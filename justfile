@@ -1,3 +1,6 @@
+@_default:
+				just --list
+
 # Configure the build (first run only, or after editing CMakeLists.txt)
 configure:
     cmake -S . -B build -DCMAKE_BUILD_TYPE=Release

@@ -2528,6 +2528,7 @@ dependencies = [
  "serde_json",
  "slint",
  "slint-build",
+ "toml",
 ]
 
 [[package]]

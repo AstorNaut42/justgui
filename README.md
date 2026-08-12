@@ -10,10 +10,10 @@ json`), so justgui never parses justfile syntax and stays correct as `just`
 evolves.
 
 This is a Rust + [Slint](https://slint.dev) rewrite of an earlier C++/Dear
-ImGui prototype (kept in [`../src`](../src) for reference). The goal of the
-rewrite is a UI that's nicer to look at and, eventually, restylable at
-runtime through a simple config file — that theming layer isn't wired up yet,
-so today it renders with Slint's default widget style.
+ImGui prototype (kept in [`../src`](../src) for reference). Colors, fonts and
+corner radius are all driven by a small `justgui.toml` config file, and are
+re-applied live while the app is running — edit the file, save, and the
+window restyles itself with no restart.
 
 ## Introduction: the workflow this is for
 
@@ -111,11 +111,26 @@ justgui /path/to/other/project
 Or retarget it live, without restarting, using the "Directory" field and
 "Reload" button at the top of the window.
 
+## Styling
+
+Copy [`justgui.example.toml`](justgui.example.toml) to `justgui.toml` and
+adjust it — see the file for every available key (colors, dark/light mode,
+corner radius, font). justgui looks for a config file in this order:
+
+1. `justgui.toml` in the directory you pointed it at (per-project theme).
+2. `~/.config/justgui/config.toml` (or `$XDG_CONFIG_HOME`/`%APPDATA%` on
+   Windows) as a global default.
+3. Built-in defaults if neither exists.
+
+Any key you omit falls back to the default, so a config file can be as
+small as one line. Changes to whichever file is active are picked up
+automatically about once a second — no need to restart or hit Reload, just
+save the file and watch the window update.
+
 ## Notes / limitations
 
 - Editing the justfile writes the raw text back to disk with no validation;
   if the result doesn't parse, `just`'s error shows up in the Recipes tab.
 - The recipe list is fetched fresh from `just` on load/reload, not
-  file-watched — hit "Reload" after editing the justfile externally.
-- Styling is currently Slint's default widget theme; runtime-configurable
-  theming via a config file is planned but not yet implemented.
+  file-watched — hit "Reload" after editing the justfile externally (this is
+  separate from styling, which *is* watched live; see [Styling](#styling)).

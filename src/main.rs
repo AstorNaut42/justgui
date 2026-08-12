@@ -4,6 +4,7 @@
 // recipe's output live, and offers a plain-text editor for the justfile.
 mod just_client;
 mod process;
+mod theme;
 
 use just_client::{build_run_command, load_justfile, JustModel};
 use process::Process;
@@ -11,6 +12,7 @@ use slint::{ModelRc, VecModel};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
+use theme::ThemeConfig;
 
 slint::include_modules!();
 
@@ -23,6 +25,36 @@ struct AppState {
     running_recipe: String, // non-empty while `run_proc` output belongs to a run
     edit_dirty: bool,
     edit_status: String,
+    theme: ThemeConfig,
+}
+
+fn apply_theme(ui: &AppWindow, cfg: &ThemeConfig) {
+    let t = ui.global::<Theme>();
+    t.set_background(theme::parse_color(&cfg.background));
+    t.set_panel_background(theme::parse_color(&cfg.panel_background));
+    t.set_border(theme::parse_color(&cfg.border));
+    t.set_accent(theme::parse_color(&cfg.accent));
+    t.set_text(theme::parse_color(&cfg.text));
+    t.set_muted_text(theme::parse_color(&cfg.muted_text));
+    t.set_error(theme::parse_color(&cfg.error));
+    t.set_warning(theme::parse_color(&cfg.warning));
+    t.set_corner_radius(cfg.corner_radius);
+    t.set_font_family(cfg.font_family.clone().into());
+    t.set_font_size(cfg.font_size);
+    t.set_dark_mode(cfg.mode.eq_ignore_ascii_case("dark"));
+}
+
+/// Re-resolves the theme for the current directory and re-applies it only
+/// if something actually changed -- called both on reload and on a timer,
+/// so editing `justgui.toml` restyles the running app with no restart.
+fn refresh_theme(ui: &AppWindow, state: &Rc<RefCell<AppState>>) {
+    let dir = state.borrow().dir.clone();
+    let resolved = theme::resolve(&dir);
+    let changed = resolved != state.borrow().theme;
+    if changed {
+        state.borrow_mut().theme = resolved.clone();
+        apply_theme(ui, &resolved);
+    }
 }
 
 fn param_hint(p: &just_client::JustParam) -> String {
@@ -106,6 +138,9 @@ fn reload(ui: &AppWindow, state: &Rc<RefCell<AppState>>) {
 
     sync_ui(ui, &st);
     ui.set_edit_buffer(edit_buffer.into());
+    drop(st);
+
+    refresh_theme(ui, state);
 }
 
 fn run_recipe(ui: &AppWindow, state: &Rc<RefCell<AppState>>, idx: usize) {
@@ -203,6 +238,7 @@ fn main() {
         running_recipe: String::new(),
         edit_dirty: false,
         edit_status: String::new(),
+        theme: ThemeConfig::default(),
     }));
 
     ui.set_directory(dir.into());
@@ -284,6 +320,21 @@ fn main() {
             move || {
                 if let Some(ui) = ui_handle.upgrade() {
                     poll_log(&ui, &state);
+                }
+            },
+        );
+    }
+
+    let theme_timer = slint::Timer::default();
+    {
+        let ui_handle = ui.as_weak();
+        let state = state.clone();
+        theme_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(750),
+            move || {
+                if let Some(ui) = ui_handle.upgrade() {
+                    refresh_theme(&ui, &state);
                 }
             },
         );

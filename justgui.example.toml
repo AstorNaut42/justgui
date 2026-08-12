@@ -1,0 +1,25 @@
+# Example justgui theme config. Copy this to `justgui.toml` in the
+# directory you run `justgui` from (per-project), or to
+# `~/.config/justgui/config.toml` (applies everywhere as a default).
+#
+# All keys are optional -- omit anything you want to keep at its default.
+# Edits are picked up live while justgui is running, no restart needed.
+
+[theme]
+# "dark" or "light" -- controls the built-in widget style (buttons, tabs,
+# checkboxes, text inputs). Custom colors below apply regardless of mode.
+mode = "dark"
+
+# Hex colors, "#RRGGBB" or "#RRGGBBAA".
+background = "#1e1e1e"        # window background
+panel-background = "#2a2a2a"  # recipe cards, output log panel
+border = "#3c3c3c"            # thin divider lines
+accent = "#7ec8ff"             # recipe names
+text = "#e6e6e6"               # default text
+muted-text = "#999999"        # doc comments, status lines
+error = "#ff6666"              # justfile parse errors
+warning = "#ffaa33"           # "unsaved changes" indicator
+
+corner-radius = 6              # px, applied to recipe cards and the output panel
+font-family = ""               # empty = system default
+font-size = 14                 # px

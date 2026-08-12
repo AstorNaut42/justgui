@@ -94,13 +94,83 @@ justgui
 
 That's it — a window opens with:
 
-- **Recipes tab**: one entry per recipe, with its doc comment, an input
-  field for each parameter (pre-filled with its default value if it has
-  one), and a "Run" button. Output streams live below as the recipe runs.
-  Variadic parameters (`*args` / `+args`) are entered as a single
-  space-separated field.
+- **Recipes tab**: a grid of buttons, one per recipe you've chosen to show
+  (see [The recipe grid](#the-recipe-grid) below).
 - **Edit justfile tab**: the raw justfile as text, with Save and "Reload
   from disk" buttons.
+
+A "Transparency" slider and a "Theme" button sit above the tabs — see
+[Transparency and the theme editor](#transparency-and-the-theme-editor).
+
+Output from whichever recipe you last ran streams live in the panel at the
+bottom of the window, with an input field below it for recipes that prompt
+for confirmation or other input — see
+[Live output and input](#live-output-and-input).
+
+## The recipe grid
+
+Each recipe is a plain button showing just its name. The grid reflows to
+fit however wide you make the window.
+
+- **Run it**: click a button. If the recipe takes no parameters, it runs
+  immediately. If it does, clicking opens a small popover with a field per
+  parameter (pre-filled with its default, if any) and a "Run" button inside.
+  Variadic parameters (`*args` / `+args`) are entered as a single
+  space-separated field.
+- **See what it does**: hover over a button for its doc comment as a
+  tooltip.
+- **Choose which recipes are shown**: click "Select recipes" above the
+  grid — a checklist of every recipe in the justfile, plus a "Show hidden
+  recipes" toggle to include private (`_`-prefixed or `[private]`) ones in
+  that list. Unchecked recipes just aren't in the grid at all — nothing sits
+  there hidden-but-reserving-space.
+- **Reorder**: click a button's ⇄ handle (top-right corner) to pick it up,
+  then click another button to swap their positions. Click the picked-up
+  button again to cancel.
+- **Color a button**: click its 🎨 handle (top-left corner) and pick a
+  swatch.
+
+Selection, order, and color are saved automatically to
+`justgui.layout.toml` next to the justfile — a separate file from
+`justgui.toml` so that saving never touches (or reformats away the comments
+in) your hand-edited theme config. It's fully managed by justgui: don't
+hand-edit it while the app is running, and it's safe to delete to reset
+back to showing every recipe in justfile order.
+
+## Transparency and the theme editor
+
+The "Transparency" slider blends the window background toward see-through
+live. Whether that reads as "you can see the desktop behind it" or just "a
+lighter/darker panel" depends on what your OS/window manager negotiates for
+window compositing — worth a quick look on your setup rather than assumed.
+
+The "Theme" button opens a panel with the same settings as
+`justgui.toml`'s `[theme]` table (colors as swatches, dark/light mode,
+corner radius, font size, font family) as live controls — changes apply to
+the window immediately. Nothing is written to disk until you click "Save"
+inside that panel, which overwrites `justgui.toml` (same tradeoff as the
+"Edit justfile" tab's Save: a full-file rewrite, so any comments you've
+added to `justgui.toml` by hand won't survive a Save here). Until you Save
+or hit the top-level "Reload" button, live edits aren't clobbered by the
+usual once-a-second config file watch (see [Styling](#styling)).
+
+## Live output and input
+
+The output panel at the bottom streams a running recipe's combined
+stdout/stderr live. Below it, the input field (enabled only while something
+is running) sends a line of text to the recipe's stdin when you press Enter
+or click "Send" — this is what lets a recipe that does something like
+`read -p "Continue? [y/N] "` actually receive your answer. What you send is
+echoed into the output panel (prefixed with `>`) since the process itself
+won't echo it back the way a real terminal would.
+
+This is a plain pipe, not a full pseudo-terminal: no ANSI/cursor-control
+handling, and it won't drive a full-screen/curses-style recipe. It also
+means a recipe's stdin now stays open for the life of the process instead of
+getting an immediate EOF — a recipe that reads-to-EOF without prompting
+(e.g. piping through `cat` with no input) can hang where it wouldn't have
+before. Click "Close input" to send EOF and unstick it; there is currently
+no way to kill a running process outright.
 
 You can also point it at a different directory without `cd`-ing:
 
@@ -125,7 +195,9 @@ corner radius, font). justgui looks for a config file in this order:
 Any key you omit falls back to the default, so a config file can be as
 small as one line. Changes to whichever file is active are picked up
 automatically about once a second — no need to restart or hit Reload, just
-save the file and watch the window update.
+save the file and watch the window update. You can also edit these same
+settings from inside the running app — see
+[Transparency and the theme editor](#transparency-and-the-theme-editor).
 
 ## Notes / limitations
 
@@ -134,3 +206,11 @@ save the file and watch the window update.
 - The recipe list is fetched fresh from `just` on load/reload, not
   file-watched — hit "Reload" after editing the justfile externally (this is
   separate from styling, which *is* watched live; see [Styling](#styling)).
+- The recipe grid layout (`justgui.layout.toml`) is likewise only read on
+  load/reload, not live-watched.
+- The in-app theme editor's live edits are session-only until you click its
+  "Save" button; the top-level "Reload" button discards them back to
+  whatever's on disk (there's no separate "discard" action).
+- The output/input panel is a plain text stream, not a real terminal — see
+  [Live output and input](#live-output-and-input) for what that does and
+  doesn't support.

@@ -2,10 +2,10 @@
 // Slint UI can bind to. Lookup order: `<dir>/justgui.toml` (per-project),
 // then a user-level config, then built-in defaults. Never fatal -- a
 // missing or malformed file just falls back to the next candidate.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct ThemeConfig {
     pub mode: String, // "dark" or "light" -- controls built-in widget styling
@@ -41,7 +41,7 @@ impl Default for ThemeConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ConfigFile {
     #[serde(default)]
     theme: ThemeConfig,
@@ -89,6 +89,15 @@ pub fn resolve(dir: &str) -> ThemeConfig {
     ThemeConfig::default()
 }
 
+/// Full overwrite of `<dir>/justgui.toml` -- only called from an explicit
+/// Save action (the in-app theme editor), same accepted comment-loss
+/// tradeoff `save_edit()` in main.rs already has for the justfile itself.
+pub fn save(dir: &str, cfg: &ThemeConfig) -> std::io::Result<()> {
+    let file = ConfigFile { theme: cfg.clone() };
+    let text = toml::to_string_pretty(&file).map_err(std::io::Error::other)?;
+    std::fs::write(Path::new(dir).join("justgui.toml"), text)
+}
+
 /// Parses `#RRGGBB` or `#RRGGBBAA` (leading `#` optional). Falls back to an
 /// unmissable magenta on a malformed value, rather than panicking on a typo
 /// in a user-edited config file.
@@ -104,4 +113,10 @@ pub fn parse_color(s: &str) -> slint::Color {
     } else {
         slint::Color::from_argb_u8(255, 255, 0, 255)
     }
+}
+
+/// Inverse of `parse_color`, for writing a color picked in the UI back into
+/// a hex string (recipe accent colors, theme editor swatches).
+pub fn color_to_hex(color: &slint::Color) -> String {
+    format!("#{:02x}{:02x}{:02x}", color.red(), color.green(), color.blue())
 }

@@ -156,21 +156,31 @@ usual once-a-second config file watch (see [Styling](#styling)).
 
 ## Live output and input
 
-The output panel at the bottom streams a running recipe's combined
-stdout/stderr live. Below it, the input field (enabled only while something
-is running) sends a line of text to the recipe's stdin when you press Enter
-or click "Send" — this is what lets a recipe that does something like
-`read -p "Continue? [y/N] "` actually receive your answer. What you send is
-echoed into the output panel (prefixed with `>`) since the process itself
-won't echo it back the way a real terminal would.
+Recipes run attached to a real pseudo-terminal (via
+[`portable-pty`](https://docs.rs/portable-pty)), not just a plain pipe —
+that's what makes `sudo`, `ssh`, and anything else that insists on a real
+controlling terminal before prompting actually work here. The output panel
+at the bottom streams a running recipe's output live. Below it, the input
+field (enabled only while something is running) sends a line of text when
+you press Enter or click "Send" — this is what lets a recipe that does
+something like `read -p "Continue? [y/N] "`, or `sudo` asking for your
+password, actually receive your answer. What you send shows up in the
+output panel because the pty itself echoes it back, the same way a real
+terminal would — justgui doesn't synthesize that.
 
-This is a plain pipe, not a full pseudo-terminal: no ANSI/cursor-control
-handling, and it won't drive a full-screen/curses-style recipe. It also
-means a recipe's stdin now stays open for the life of the process instead of
-getting an immediate EOF — a recipe that reads-to-EOF without prompting
-(e.g. piping through `cat` with no input) can hang where it wouldn't have
-before. Click "Close input" to send EOF and unstick it; there is currently
-no way to kill a running process outright.
+- **Collapse it**: click the "Output" row to hide/show the panel.
+- **Resize it**: drag the thin bar just above the panel up or down.
+
+Output is plain text: ANSI color and cursor-control codes are stripped
+rather than rendered (no colored text, and a full-screen/curses-style
+recipe won't render correctly — this isn't a full terminal emulator), and
+`\r`-based progress-bar redraws are collapsed down to just the latest line
+rather than showing every intermediate update. A recipe's stdin stays open
+for the life of the process instead of getting an immediate EOF, so a
+recipe that reads-to-EOF without prompting (e.g. piping through `cat` with
+no input) can hang where it wouldn't have before — click "Close input" to
+send EOF and unstick it; there is currently no way to kill a running
+process outright.
 
 You can also point it at a different directory without `cd`-ing:
 

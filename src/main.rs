@@ -5,6 +5,7 @@
 mod just_client;
 mod layout;
 mod process;
+mod termout;
 mod theme;
 
 use just_client::{build_run_command, load_justfile, JustModel};
@@ -228,7 +229,7 @@ fn poll_log(ui: &AppWindow, state: &Rc<RefCell<AppState>>) {
 
     let (chunk, finished) = st.run_proc.poll();
     if !chunk.is_empty() {
-        st.run_log.push_str(&chunk);
+        termout::append_chunk(&mut st.run_log, &chunk);
     }
     if finished && !st.running_recipe.is_empty() {
         let code = st.run_proc.exit_code();
@@ -275,19 +276,16 @@ fn save_edit(ui: &AppWindow, state: &Rc<RefCell<AppState>>) {
     ui.set_edit_status(status.into());
 }
 
-/// Sends a line to the running recipe's stdin and echoes it into the log.
-/// This is a plain pipe, not a pseudo-terminal, so the child process won't
-/// echo what was typed the way a real terminal would -- without this the
-/// user would get no visual confirmation their input was sent.
-fn send_input(ui: &AppWindow, state: &Rc<RefCell<AppState>>, text: String) {
-    let mut st = state.borrow_mut();
+/// Sends a line to the running recipe's pty stdin. The pty's own line
+/// discipline echoes it back through the normal output stream (like a real
+/// terminal would), so it shows up in the log via the next `poll_log` --
+/// no need to echo it here ourselves.
+fn send_input(state: &Rc<RefCell<AppState>>, text: String) {
+    let st = state.borrow();
     if !st.run_proc.running() {
         return;
     }
-    if st.run_proc.send_input(&text) {
-        st.run_log.push_str(&format!("> {text}\n"));
-        ui.set_run_log(st.run_log.clone().into());
-    }
+    st.run_proc.send_input(&text);
 }
 
 fn close_input(state: &Rc<RefCell<AppState>>) {
@@ -497,12 +495,9 @@ fn main() {
     }
 
     {
-        let ui_handle = ui.as_weak();
         let state = state.clone();
         ui.on_send_input(move |text| {
-            if let Some(ui) = ui_handle.upgrade() {
-                send_input(&ui, &state, text.to_string());
-            }
+            send_input(&state, text.to_string());
         });
     }
 

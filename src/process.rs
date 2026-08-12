@@ -1,8 +1,13 @@
-// Runs a shell command in the background and streams its combined
-// stdout+stderr back to the caller. Backed by `sh -c`/`cmd /C`, so it works
-// unmodified on Linux, macOS and Windows without extra dependencies.
+// Runs a shell command in the background and streams its output back to
+// the caller, with the child attached to a real pseudo-terminal (not just
+// a plain pipe). A pty is what lets `sudo`, `ssh`, and anything else that
+// insists on a controlling terminal actually work through the app's input
+// box -- a plain pipe stdin is invisible to those (they open `/dev/tty`
+// directly rather than reading a piped stdin). Backed by `portable-pty`,
+// which is cross-platform (real ptys on Unix, ConPTY on Windows), so this
+// still works unmodified on Linux, macOS and Windows.
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
-use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -11,7 +16,10 @@ struct Inner {
     buffer: Arc<Mutex<String>>,
     running: Arc<AtomicBool>,
     exit_code: Arc<AtomicI32>,
-    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
+    // Kept alive for the pty's lifetime; the reader/writer above are cloned
+    // handles that only stay valid while this isn't dropped.
+    _master: Box<dyn MasterPty + Send>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -26,7 +34,8 @@ impl Process {
     }
 
     /// Starts `command` (a full shell command line) with working directory
-    /// `cwd`. Returns false if a process is already running.
+    /// `cwd`. Returns false if a process is already running or the pty/
+    /// child failed to spawn.
     pub fn start(&mut self, command: &str, cwd: &str) -> bool {
         if self.running() {
             return false;
@@ -37,44 +46,59 @@ impl Process {
             }
         }
 
-        let full = format!("{command} 2>&1");
+        let pty_system = native_pty_system();
+        // Generously wide so the pty's own hard-wrap rarely fights with the
+        // output panel's own word-wrap.
+        let pair = match pty_system.openpty(PtySize {
+            rows: 50,
+            cols: 200,
+            pixel_width: 0,
+            pixel_height: 0,
+        }) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+
         let mut cmd = if cfg!(windows) {
-            let mut c = Command::new("cmd");
-            c.args(["/C", &full]);
+            let mut c = CommandBuilder::new("cmd");
+            c.args(["/C", command]);
             c
         } else {
-            let mut c = Command::new("sh");
-            c.args(["-c", &full]);
+            let mut c = CommandBuilder::new("sh");
+            c.args(["-c", command]);
             c
         };
-        cmd.current_dir(cwd);
-        cmd.stdin(Stdio::piped());
-        cmd.stdout(Stdio::piped());
+        cmd.cwd(cwd);
 
-        let mut child = match cmd.spawn() {
+        let mut child = match pair.slave.spawn_command(cmd) {
             Ok(c) => c,
             Err(_) => return false,
         };
-        let mut stdout = match child.stdout.take() {
-            Some(s) => s,
-            None => return false,
+        drop(pair.slave);
+
+        let mut reader = match pair.master.try_clone_reader() {
+            Ok(r) => r,
+            Err(_) => return false,
         };
-        let child_stdin = child.stdin.take();
+        let writer = match pair.master.take_writer() {
+            Ok(w) => w,
+            Err(_) => return false,
+        };
 
         let buffer = Arc::new(Mutex::new(String::new()));
         let running = Arc::new(AtomicBool::new(true));
         let exit_code = Arc::new(AtomicI32::new(0));
-        let stdin = Arc::new(Mutex::new(child_stdin));
+        let writer = Arc::new(Mutex::new(Some(writer)));
 
         let buf = buffer.clone();
         let run = running.clone();
         let code = exit_code.clone();
-        let stdin_for_thread = stdin.clone();
+        let writer_for_thread = writer.clone();
 
         let handle = std::thread::spawn(move || {
             let mut chunk = [0u8; 4096];
             loop {
-                match stdout.read(&mut chunk) {
+                match reader.read(&mut chunk) {
                     Ok(0) => break,
                     Ok(n) => {
                         let text = String::from_utf8_lossy(&chunk[..n]).into_owned();
@@ -83,16 +107,15 @@ impl Process {
                     Err(_) => break,
                 }
             }
-            let status = child.wait();
-            let c = match status {
-                Ok(s) => s.code().unwrap_or(-1),
+            let c = match child.wait() {
+                Ok(status) => status.exit_code() as i32,
                 Err(_) => -1,
             };
             code.store(c, Ordering::SeqCst);
-            // Drop any still-open stdin handle now that the child has
-            // exited, so a late `send_input` fails cleanly instead of
-            // writing into a handle whose process is already gone.
-            *stdin_for_thread.lock().unwrap() = None;
+            // Drop any still-open writer now that the child has exited, so
+            // a late `send_input` fails cleanly instead of writing into a
+            // handle whose process is already gone.
+            *writer_for_thread.lock().unwrap() = None;
             run.store(false, Ordering::SeqCst);
         });
 
@@ -100,17 +123,17 @@ impl Process {
             buffer,
             running,
             exit_code,
-            stdin,
+            writer,
+            _master: pair.master,
             handle: Some(handle),
         });
         true
     }
 
-    /// Writes `line` followed by a newline to the running child's stdin.
+    /// Writes `line` followed by a newline to the running child's pty.
     /// Returns false if nothing is running or the write failed (e.g. the
-    /// child already exited). This is a plain pipe, not a pseudo-terminal --
-    /// it satisfies recipes that `read` a line (confirmation prompts, etc.)
-    /// but won't drive a full-screen/curses-style recipe.
+    /// child already exited). The pty's own line discipline echoes this
+    /// back through the output stream, same as a real terminal would.
     pub fn send_input(&self, line: &str) -> bool {
         let Some(inner) = &self.inner else {
             return false;
@@ -118,24 +141,24 @@ impl Process {
         if !inner.running.load(Ordering::SeqCst) {
             return false;
         }
-        let mut guard = inner.stdin.lock().unwrap();
+        let mut guard = inner.writer.lock().unwrap();
         match guard.as_mut() {
-            Some(stdin) => stdin
+            Some(writer) => writer
                 .write_all(line.as_bytes())
-                .and_then(|_| stdin.write_all(b"\n"))
+                .and_then(|_| writer.write_all(b"\n"))
                 .is_ok(),
             None => false,
         }
     }
 
-    /// Closes the running child's stdin, sending it EOF. This is the only
-    /// way to unstick a recipe that reads stdin to EOF without prompting
-    /// (there is no "kill" -- closing input is the escape hatch).
+    /// Closes the running child's pty input, sending it EOF. This is the
+    /// only way to unstick a recipe that reads stdin to EOF without
+    /// prompting (there is no "kill" -- closing input is the escape hatch).
     pub fn close_input(&self) -> bool {
         let Some(inner) = &self.inner else {
             return false;
         };
-        *inner.stdin.lock().unwrap() = None;
+        *inner.writer.lock().unwrap() = None;
         true
     }
 
@@ -171,6 +194,23 @@ impl Process {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn diagnostic_just_build_like_the_real_app() {
+        let mut p = Process::new();
+        assert!(p.start("just --version", "/home/hpbrandal/mini-projects/justgui"));
+        let mut collected = String::new();
+        loop {
+            let (chunk, finished) = p.poll();
+            collected.push_str(&chunk);
+            if finished {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        eprintln!("DIAGNOSTIC OUTPUT: {collected:?}");
+        eprintln!("DIAGNOSTIC EXIT CODE: {}", p.exit_code());
+    }
 
     #[test]
     fn streams_output_and_exit_code() {

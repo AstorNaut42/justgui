@@ -53,6 +53,8 @@ export component AppWindow inherits Window {
     in-out property <string> edit-buffer;
     in-out property <string> stdin-text;
     in-out property <float> transparency: 1.0;
+    in-out property <bool> output-collapsed: false;
+    in-out property <length> output-height: 220px;
 
     in property <[RecipeData]> recipes;     // filtered + ordered, for the grid
     in property <[RecipeData]> all-recipes; // everyone + ordered, for the picker
@@ -94,7 +96,7 @@ export component AppWindow inherits Window {
         padding: 8px;
         spacing: 6px;
 
-        HorizontalLayout {
+        dir-row := HorizontalLayout {
             spacing: 6px;
             Text { text: "Directory:"; vertical-alignment: center; }
             LineEdit {
@@ -104,7 +106,7 @@ export component AppWindow inherits Window {
             Button { text: "Reload"; clicked => { root.reload(); } }
         }
 
-        HorizontalLayout {
+        toolbar-row := HorizontalLayout {
             spacing: 6px;
             Text { text: "Transparency:"; vertical-alignment: center; }
             Slider {
@@ -117,14 +119,18 @@ export component AppWindow inherits Window {
         }
 
         theme-popup := PopupWindow {
-            x: 0px; y: 0px;
+            x: 0px;
+            y: dir-row.height + toolbar-row.height + 12px;
+            width: 320px;
+            height: 340px;
             close-policy: PopupClosePolicy.close-on-click-outside;
             Rectangle {
+                width: 100%;
+                height: 100%;
                 background: Theme.panel-background;
                 border-radius: Theme.corner-radius;
                 border-width: 1px;
                 border-color: Theme.border;
-                width: 320px;
 
                 VerticalLayout {
                     padding: 10px;
@@ -214,22 +220,24 @@ export component AppWindow inherits Window {
                         wrap: word-wrap;
                     }
 
-                    HorizontalLayout {
+                    select-row := HorizontalLayout {
                         spacing: 6px;
                         Button { text: "Select recipes"; clicked => { picker.show(); } }
                     }
 
                     picker := PopupWindow {
-                        visible: true;
-                        x: 10px; y: 0px;
+                        x: 0px;
+                        y: select-row.height + 4px;
+                        width: 260px;
+                        height: 320px;
                         close-policy: PopupClosePolicy.close-on-click-outside;
                         Rectangle {
+                            width: 100%;
+                            height: 100%;
                             background: Theme.panel-background;
                             border-radius: Theme.corner-radius;
                             border-width: 1px;
                             border-color: Theme.border;
-                            width: 260px;
-                            height: 320px;
 
                             VerticalLayout {
                                 padding: 10px;
@@ -262,7 +270,9 @@ export component AppWindow inherits Window {
 
                     ScrollView {
                         vertical-stretch: 1;
-                        Rectangle {
+                        viewport-width: grid.width;
+                        viewport-height: grid.height;
+                        grid := Rectangle {
                             property <length> tile-w: 220px;
                             property <length> tile-h: 110px;
                             property <length> gap: 8px;
@@ -331,8 +341,14 @@ export component AppWindow inherits Window {
                                 }
 
                                 color-popup := PopupWindow {
+                                    x: 0px;
+                                    y: tile-h + 4px;
+                                    width: root.palette.length * 20px + 12px;
+                                    height: 28px;
                                     close-policy: PopupClosePolicy.close-on-click-outside;
                                     Rectangle {
+                                        width: 100%;
+                                        height: 100%;
                                         background: Theme.panel-background;
                                         border-radius: Theme.corner-radius;
                                         border-width: 1px;
@@ -357,13 +373,18 @@ export component AppWindow inherits Window {
                                 }
 
                                 param-popup := PopupWindow {
+                                    x: 0px;
+                                    y: tile-h + 4px;
+                                    width: 260px;
+                                    height: 90px + recipe.params.length * 36px;
                                     close-policy: PopupClosePolicy.close-on-click-outside;
                                     Rectangle {
+                                        width: 100%;
+                                        height: 100%;
                                         background: Theme.panel-background;
                                         border-radius: Theme.corner-radius;
                                         border-width: 1px;
                                         border-color: Theme.border;
-                                        width: 260px;
 
                                         VerticalLayout {
                                             padding: 10px;
@@ -396,7 +417,6 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
-                        ScrollView { }
                     }
                 }
             }
@@ -436,21 +456,48 @@ export component AppWindow inherits Window {
 
         HorizontalLayout {
             spacing: 6px;
-            Text { text: root.running ? "Output (running...)" : "Output"; vertical-alignment: center; }
+            output-toggle := TouchArea {
+                horizontal-stretch: 1;
+                clicked => { root.output-collapsed = !root.output-collapsed; }
+                HorizontalLayout {
+                    Text {
+                        text: (root.output-collapsed ? "▸ " : "▾ ") + (root.running ? "Output (running...)" : "Output");
+                        vertical-alignment: center;
+                    }
+                }
+            }
             Button { text: "Clear"; clicked => { root.clear-log(); } }
         }
 
-        Rectangle {
+        if !root.output-collapsed : splitter := Rectangle {
+            height: 6px;
+            background: splitter-area.has-hover || splitter-area.pressed ? Theme.accent : Theme.border;
+
+            splitter-area := TouchArea {
+                property <length> drag-start-height;
+                mouse-cursor: MouseCursor.row-resize;
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down) {
+                        self.drag-start-height = root.output-height;
+                    }
+                }
+                moved => {
+                    root.output-height = max(60px, min(600px, self.drag-start-height + (self.pressed-y - self.mouse-y)));
+                }
+            }
+        }
+
+        if !root.output-collapsed : Rectangle {
             background: Theme.panel-background;
             border-radius: Theme.corner-radius;
-            height: 220px;
-            ScrollView {
-                Text {
-                    text: root.run-log;
-                    wrap: word-wrap;
-                    font-family: "monospace";
-                    font-size: 13px;
-                }
+            height: root.output-height;
+            clip: true;
+            TextEdit {
+                text: root.run-log;
+                read-only: true;
+                wrap: word-wrap;
+                font-family: "monospace";
+                font-size: 13px;
             }
         }
 

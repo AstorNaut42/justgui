@@ -1,0 +1,168 @@
+import { Button, LineEdit, ScrollView, TabWidget, TextEdit, CheckBox } from "std-widgets.slint";
+
+export struct ParamData {
+    name: string,
+    hint: string,
+    default-value: string,
+}
+
+export struct RecipeData {
+    name: string,
+    doc: string,
+    is-private: bool,
+    params: [ParamData],
+}
+
+export component AppWindow inherits Window {
+    title: "justgui";
+    preferred-width: 1000px;
+    preferred-height: 700px;
+
+    in-out property <string> directory;
+    in-out property <bool> show-private: false;
+    in-out property <string> edit-buffer;
+
+    in property <[RecipeData]> recipes;
+    in property <string> load-error;
+    in property <string> run-log;
+    in property <bool> running;
+    in property <bool> edit-dirty;
+    in property <string> edit-status;
+    in property <string> justfile-path;
+
+    callback reload();
+    callback run-recipe(int);
+    callback param-edited(int, int, string);
+    callback save-edit();
+    callback edit-touched();
+    callback clear-log();
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+
+        HorizontalLayout {
+            spacing: 6px;
+            Text { text: "Directory:"; vertical-alignment: center; }
+            LineEdit {
+                text <=> root.directory;
+                horizontal-stretch: 1;
+            }
+            Button { text: "Reload"; clicked => { root.reload(); } }
+        }
+
+        Rectangle { height: 1px; background: #444444; }
+
+        TabWidget {
+            Tab {
+                title: "Recipes";
+                VerticalLayout {
+                    spacing: 6px;
+
+                    if root.load-error != "" : Text {
+                        text: root.load-error;
+                        color: #ff6666;
+                        wrap: word-wrap;
+                    }
+
+                    if root.load-error == "" : CheckBox {
+                        text: "Show private recipes";
+                        checked <=> root.show-private;
+                    }
+
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 6px;
+                            for recipe[ri] in root.recipes : Rectangle {
+                                visible: !recipe.is-private || root.show-private;
+                                background: #2a2a2a;
+                                border-radius: 6px;
+
+                                VerticalLayout {
+                                    padding: 10px;
+                                    spacing: 4px;
+
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text { text: recipe.name; font-weight: 700; color: #7ec8ff; }
+                                        Text { text: recipe.doc; color: #999999; }
+                                    }
+
+                                    for param[pi] in recipe.params : HorizontalLayout {
+                                        spacing: 6px;
+                                        Text { text: param.name; vertical-alignment: center; min-width: 110px; }
+                                        LineEdit {
+                                            text: param.default-value;
+                                            placeholder-text: param.hint;
+                                            horizontal-stretch: 1;
+                                            edited(t) => { root.param-edited(ri, pi, t); }
+                                        }
+                                    }
+
+                                    Button {
+                                        text: "Run";
+                                        enabled: !root.running;
+                                        clicked => { root.run-recipe(ri); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text { text: root.running ? "Output (running...)" : "Output"; vertical-alignment: center; }
+                        Button { text: "Clear"; clicked => { root.clear-log(); } }
+                    }
+
+                    Rectangle {
+                        background: #1a1a1a;
+                        border-radius: 4px;
+                        vertical-stretch: 1;
+                        ScrollView {
+                            Text {
+                                text: root.run-log;
+                                wrap: word-wrap;
+                                font-family: "monospace";
+                                font-size: 13px;
+                            }
+                        }
+                    }
+                }
+            }
+
+            Tab {
+                title: "Edit justfile";
+                VerticalLayout {
+                    spacing: 6px;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: root.justfile-path == "" ? "(no justfile found)" : root.justfile-path;
+                            color: #999999;
+                        }
+                        if root.edit-dirty : Text { text: "(unsaved changes)"; color: #ffaa33; }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Button { text: "Save"; enabled: root.justfile-path != ""; clicked => { root.save-edit(); } }
+                        Button { text: "Reload from disk"; clicked => { root.reload(); } }
+                        Text { text: root.edit-status; color: #999999; vertical-alignment: center; }
+                    }
+
+                    Rectangle { height: 1px; background: #444444; }
+
+                    TextEdit {
+                        text <=> root.edit-buffer;
+                        vertical-stretch: 1;
+                        font-family: "monospace";
+                        edited(t) => { root.edit-touched(); }
+                    }
+                }
+            }
+        }
+    }
+}

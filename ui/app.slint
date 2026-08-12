@@ -56,8 +56,9 @@ export component AppWindow inherits Window {
     in-out property <bool> output-collapsed: false;
     in-out property <length> output-height: 220px;
 
-    in property <[RecipeData]> recipes;     // filtered + ordered, for the grid
-    in property <[RecipeData]> all-recipes; // everyone + ordered, for the picker
+    in property <[RecipeData]> recipes;       // filtered + ordered, parameterless, for the grid
+    in property <[RecipeData]> param-recipes; // filtered + ordered, has params, shown as cards
+    in property <[RecipeData]> all-recipes;   // everyone + ordered, for the picker
     in property <string> load-error;
     in property <string> run-log;
     in property <bool> running;
@@ -268,151 +269,197 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    ScrollView {
+                    recipes-scroll := ScrollView {
                         vertical-stretch: 1;
-                        viewport-width: grid.width;
-                        viewport-height: grid.height;
-                        grid := Rectangle {
-                            property <length> tile-w: 220px;
-                            property <length> tile-h: 110px;
-                            property <length> gap: 8px;
-                            property <int> cols: max(1, floor((self.width - gap) / (tile-w + gap)));
-                            width: parent.width;
-                            height: root.recipes.length > 0 ? ceil(root.recipes.length / cols) * (tile-h + gap) + gap : 0px;
+                        recipes-content := VerticalLayout {
+                            spacing: 12px;
 
-                            for recipe[i] in root.recipes : Rectangle {
-                                x: mod(i, cols) * (tile-w + gap) + gap;
-                                y: floor(i / cols) * (tile-h + gap) + gap;
-                                width: tile-w;
-                                height: tile-h;
-                                background: recipe.color;
-                                border-radius: Theme.corner-radius;
-                                border-width: root.reordering-recipe-index == recipe.recipe-index ? 3px : 0px;
-                                border-color: Theme.text;
+                            grid := Rectangle {
+                                property <length> tile-w: 220px;
+                                property <length> tile-h: 110px;
+                                property <length> gap: 8px;
+                                property <int> cols: max(1, floor((self.width - gap) / (tile-w + gap)));
+                                width: recipes-scroll.visible-width;
+                                height: root.recipes.length > 0 ? ceil(root.recipes.length / cols) * (tile-h + gap) + gap : 0px;
 
-                                TouchArea {
-                                    clicked => {
-                                        if (root.reordering-recipe-index >= 0 && root.reordering-recipe-index != recipe.recipe-index) {
-                                            root.recipe-dropped(root.reordering-recipe-index, recipe.recipe-index);
-                                            root.reordering-recipe-index = -1;
-                                        } else if (recipe.params.length == 0) {
-                                            root.run-recipe(recipe.recipe-index);
-                                        } else {
-                                            param-popup.show();
+                                for recipe[i] in root.recipes : Rectangle {
+                                    x: mod(i, cols) * (tile-w + gap) + gap;
+                                    y: floor(i / cols) * (tile-h + gap) + gap;
+                                    width: tile-w;
+                                    height: tile-h;
+                                    background: recipe.color;
+                                    border-radius: Theme.corner-radius;
+                                    border-width: root.reordering-recipe-index == recipe.recipe-index ? 3px : 0px;
+                                    border-color: Theme.text;
+
+                                    TouchArea {
+                                        clicked => {
+                                            if (root.reordering-recipe-index >= 0 && root.reordering-recipe-index != recipe.recipe-index) {
+                                                root.recipe-dropped(root.reordering-recipe-index, recipe.recipe-index);
+                                                root.reordering-recipe-index = -1;
+                                            } else {
+                                                root.run-recipe(recipe.recipe-index);
+                                            }
                                         }
-                                    }
 
-                                    VerticalLayout {
-                                        padding: 8px;
-                                        alignment: center;
-                                        Text {
-                                            text: recipe.name;
-                                            font-weight: 700;
-                                            horizontal-alignment: center;
-                                            wrap: word-wrap;
+                                        VerticalLayout {
+                                            padding: 8px;
+                                            alignment: center;
+                                            Text {
+                                                text: recipe.name;
+                                                font-weight: 700;
+                                                horizontal-alignment: center;
+                                                wrap: word-wrap;
+                                            }
                                         }
+
+                                        Tooltip { text: @markdown("\{recipe.doc}"); }
                                     }
 
-                                    Tooltip { text: @markdown("\{recipe.doc}"); }
-                                }
-
-                                // Small corner handle: click to pick this tile
-                                // up, then click another tile to swap places.
-                                TouchArea {
-                                    x: parent.width - 22px;
-                                    y: 2px;
-                                    width: 20px;
-                                    height: 20px;
-                                    clicked => {
-                                        root.reordering-recipe-index = root.reordering-recipe-index == recipe.recipe-index ? -1 : recipe.recipe-index;
+                                    // Small corner handle: click to pick this tile
+                                    // up, then click another tile to swap places.
+                                    TouchArea {
+                                        x: parent.width - 22px;
+                                        y: 2px;
+                                        width: 20px;
+                                        height: 20px;
+                                        clicked => {
+                                            root.reordering-recipe-index = root.reordering-recipe-index == recipe.recipe-index ? -1 : recipe.recipe-index;
+                                        }
+                                        Text { text: "⇄"; color: Theme.text; }
                                     }
-                                    Text { text: "⇄"; color: Theme.text; }
-                                }
 
-                                // Small corner handle: click to open the color
-                                // swatch popover for this recipe.
-                                TouchArea {
-                                    x: 2px;
-                                    y: 2px;
-                                    width: 20px;
-                                    height: 20px;
-                                    clicked => { color-popup.show(); }
-                                    Text { text: "🎨"; }
-                                }
+                                    // Small corner handle: click to open the color
+                                    // swatch popover for this recipe.
+                                    TouchArea {
+                                        x: 2px;
+                                        y: 2px;
+                                        width: 20px;
+                                        height: 20px;
+                                        clicked => { color-popup.show(); }
+                                        Text { text: "🎨"; }
+                                    }
 
-                                color-popup := PopupWindow {
-                                    x: 0px;
-                                    y: tile-h + 4px;
-                                    width: root.palette.length * 20px + 12px;
-                                    height: 28px;
-                                    close-policy: PopupClosePolicy.close-on-click-outside;
-                                    Rectangle {
-                                        width: 100%;
-                                        height: 100%;
-                                        background: Theme.panel-background;
-                                        border-radius: Theme.corner-radius;
-                                        border-width: 1px;
-                                        border-color: Theme.border;
-                                        HorizontalLayout {
-                                            padding: 6px;
-                                            spacing: 4px;
-                                            for c[ci] in root.palette : Rectangle {
-                                                width: 16px;
-                                                height: 16px;
-                                                border-radius: 3px;
-                                                background: c;
-                                                TouchArea {
-                                                    clicked => {
-                                                        root.set-recipe-color(recipe.recipe-index, c);
-                                                        color-popup.close();
+                                    color-popup := PopupWindow {
+                                        x: 0px;
+                                        y: tile-h + 4px;
+                                        width: root.palette.length * 20px + 12px;
+                                        height: 28px;
+                                        close-policy: PopupClosePolicy.close-on-click-outside;
+                                        Rectangle {
+                                            width: 100%;
+                                            height: 100%;
+                                            background: Theme.panel-background;
+                                            border-radius: Theme.corner-radius;
+                                            border-width: 1px;
+                                            border-color: Theme.border;
+                                            HorizontalLayout {
+                                                padding: 6px;
+                                                spacing: 4px;
+                                                for c[ci] in root.palette : Rectangle {
+                                                    width: 16px;
+                                                    height: 16px;
+                                                    border-radius: 3px;
+                                                    background: c;
+                                                    TouchArea {
+                                                        clicked => {
+                                                            root.set-recipe-color(recipe.recipe-index, c);
+                                                            color-popup.close();
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
                                     }
                                 }
+                            }
 
-                                param-popup := PopupWindow {
-                                    x: 0px;
-                                    y: tile-h + 4px;
-                                    width: 260px;
-                                    height: 90px + recipe.params.length * 36px;
-                                    close-policy: PopupClosePolicy.close-on-click-outside;
-                                    Rectangle {
-                                        width: 100%;
-                                        height: 100%;
-                                        background: Theme.panel-background;
-                                        border-radius: Theme.corner-radius;
-                                        border-width: 1px;
-                                        border-color: Theme.border;
+                            if root.param-recipes.length > 0 : Text {
+                                text: "Recipes with parameters";
+                                font-weight: 700;
+                                color: Theme.muted-text;
+                            }
 
-                                        VerticalLayout {
-                                            padding: 10px;
-                                            spacing: 6px;
+                            // Recipes that take parameters get a full-width card
+                            // with the fields shown inline (not behind a popup) --
+                            // leaving a field at its default/blank and clicking Run
+                            // is what lets a recipe's own interactive prompt (e.g.
+                            // a `select` menu in a shebang recipe) take over.
+                            for recipe[i] in root.param-recipes : Rectangle {
+                                width: recipes-scroll.visible-width;
+                                background: recipe.color;
+                                border-radius: Theme.corner-radius;
+                                border-width: root.reordering-recipe-index == recipe.recipe-index ? 3px : 0px;
+                                border-color: Theme.text;
 
-                                            Text { text: recipe.name; font-weight: 700; color: Theme.accent; }
-                                            if recipe.doc != "" : Text { text: recipe.doc; color: Theme.muted-text; wrap: word-wrap; }
+                                VerticalLayout {
+                                    padding: 10px;
+                                    spacing: 6px;
 
-                                            for param[pi] in recipe.params : HorizontalLayout {
-                                                spacing: 6px;
-                                                Text { text: param.name; vertical-alignment: center; min-width: 80px; }
-                                                LineEdit {
-                                                    text: param.default-value;
-                                                    placeholder-text: param.hint;
-                                                    horizontal-stretch: 1;
-                                                    edited(t) => { root.param-edited(recipe.recipe-index, pi, t); }
-                                                }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text { text: recipe.name; font-weight: 700; vertical-alignment: center; }
+                                        Text { text: recipe.doc; color: Theme.muted-text; vertical-alignment: center; horizontal-stretch: 1; }
+                                        card-move := TouchArea {
+                                            width: 20px;
+                                            clicked => {
+                                                root.reordering-recipe-index = root.reordering-recipe-index == recipe.recipe-index ? -1 : recipe.recipe-index;
                                             }
-
-                                            Button {
-                                                text: "Run";
-                                                enabled: !root.running;
-                                                clicked => {
-                                                    root.run-recipe(recipe.recipe-index);
-                                                    param-popup.close();
+                                            Text { text: "⇄"; color: Theme.text; }
+                                        }
+                                        card-color := TouchArea {
+                                            width: 20px;
+                                            clicked => { card-color-popup.show(); }
+                                            Text { text: "🎨"; }
+                                        }
+                                        card-color-popup := PopupWindow {
+                                            x: 0px;
+                                            y: 24px;
+                                            width: root.palette.length * 20px + 12px;
+                                            height: 28px;
+                                            close-policy: PopupClosePolicy.close-on-click-outside;
+                                            Rectangle {
+                                                width: 100%;
+                                                height: 100%;
+                                                background: Theme.panel-background;
+                                                border-radius: Theme.corner-radius;
+                                                border-width: 1px;
+                                                border-color: Theme.border;
+                                                HorizontalLayout {
+                                                    padding: 6px;
+                                                    spacing: 4px;
+                                                    for c[ci] in root.palette : Rectangle {
+                                                        width: 16px;
+                                                        height: 16px;
+                                                        border-radius: 3px;
+                                                        background: c;
+                                                        TouchArea {
+                                                            clicked => {
+                                                                root.set-recipe-color(recipe.recipe-index, c);
+                                                                card-color-popup.close();
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
+                                    }
+
+                                    for param[pi] in recipe.params : HorizontalLayout {
+                                        spacing: 6px;
+                                        Text { text: param.name; vertical-alignment: center; min-width: 110px; }
+                                        LineEdit {
+                                            text: param.default-value;
+                                            placeholder-text: param.hint;
+                                            horizontal-stretch: 1;
+                                            edited(t) => { root.param-edited(recipe.recipe-index, pi, t); }
+                                        }
+                                    }
+
+                                    Button {
+                                        text: "Run";
+                                        enabled: !root.running;
+                                        clicked => { root.run-recipe(recipe.recipe-index); }
                                     }
                                 }
                             }

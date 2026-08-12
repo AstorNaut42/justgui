@@ -196,23 +196,6 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn diagnostic_just_build_like_the_real_app() {
-        let mut p = Process::new();
-        assert!(p.start("just --version", "/home/hpbrandal/mini-projects/justgui"));
-        let mut collected = String::new();
-        loop {
-            let (chunk, finished) = p.poll();
-            collected.push_str(&chunk);
-            if finished {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        eprintln!("DIAGNOSTIC OUTPUT: {collected:?}");
-        eprintln!("DIAGNOSTIC EXIT CODE: {}", p.exit_code());
-    }
-
-    #[test]
     fn streams_output_and_exit_code() {
         let mut p = Process::new();
         assert!(p.start("sh -c 'echo hello; echo world 1>&2; exit 3'", "."));

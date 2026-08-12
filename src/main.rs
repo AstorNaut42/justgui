@@ -127,18 +127,36 @@ fn sync_ui(ui: &AppWindow, st: &AppState) {
     });
 
     let all_recipes: Vec<RecipeData> = order.iter().map(|&i| recipe_data(st, i)).collect();
-    let recipes: Vec<RecipeData> = order
+    let visible: Vec<usize> = order
         .iter()
-        .filter(|&&i| {
+        .copied()
+        .filter(|&i| {
             let r = &st.model.recipes[i];
             let shown = st.layout.recipe.iter().find(|e| e.name == r.name).is_none_or(|e| e.shown);
             shown && (!r.is_private || show_private)
         })
+        .collect();
+
+    // Parameterless recipes render as compact grid buttons; recipes that
+    // take parameters get a full-width card with the fields shown inline
+    // instead of hidden behind a popup (see app.slint) -- so a recipe with
+    // an optional/blank parameter that prompts interactively on its own
+    // (e.g. a shebang recipe using `select`) is easy to just leave blank
+    // and Run.
+    let recipes: Vec<RecipeData> = visible
+        .iter()
+        .filter(|&&i| st.model.recipes[i].params.is_empty())
+        .map(|&i| recipe_data(st, i))
+        .collect();
+    let param_recipes: Vec<RecipeData> = visible
+        .iter()
+        .filter(|&&i| !st.model.recipes[i].params.is_empty())
         .map(|&i| recipe_data(st, i))
         .collect();
 
     ui.set_all_recipes(ModelRc::new(VecModel::from(all_recipes)));
     ui.set_recipes(ModelRc::new(VecModel::from(recipes)));
+    ui.set_param_recipes(ModelRc::new(VecModel::from(param_recipes)));
     ui.set_load_error(st.model.error.clone().into());
     ui.set_justfile_path(st.model.justfile_path.clone().into());
     ui.set_edit_dirty(st.edit_dirty);
@@ -400,6 +418,112 @@ fn save_theme(ui: &AppWindow, state: &Rc<RefCell<AppState>>) {
     };
     st.editing_theme = false;
     ui.set_theme_status(status.into());
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use slint::Model;
+
+    /// Drives the real `AppWindow` + callback pipeline exactly as a click
+    /// would (via `invoke_*`, no pixel/mouse simulation needed), against a
+    /// scratch justfile with a shebang recipe whose own script prompts
+    /// interactively (a bash `select` menu) when its parameter is left
+    /// blank -- the scenario an inline, always-visible parameter field is
+    /// meant to support (leave it blank, click Run, respond to the
+    /// recipe's own prompt through the input box).
+    #[test]
+    fn recipe_with_blank_param_reaches_its_own_interactive_prompt() {
+        let dir = std::env::temp_dir().join(format!("justgui-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("justfile"),
+            r#"jam PROFILE="":
+    #!/usr/bin/env bash
+    set -e
+    profile="{{PROFILE}}"
+    if [ -z "$profile" ]; then
+        echo "Select a network emulation profile:"
+        PS3="profile> "
+        select choice in none fiber_backhaul maritime_4g_good maritime_4g_degraded satellite_geo; do
+            if [ -n "$choice" ]; then profile="$choice"; break; fi
+            echo "Invalid selection."
+        done
+    fi
+    echo "chosen profile: $profile"
+"#,
+        )
+        .unwrap();
+        let dir = dir.to_string_lossy().into_owned();
+
+        let ui = AppWindow::new().expect("failed to create Slint window");
+        let state = Rc::new(RefCell::new(AppState {
+            dir: dir.clone(),
+            model: JustModel::default(),
+            param_values: Vec::new(),
+            run_proc: Process::new(),
+            run_log: String::new(),
+            running_recipe: String::new(),
+            edit_dirty: false,
+            edit_status: String::new(),
+            theme: ThemeConfig::default(),
+            editing_theme: false,
+            layout: layout::LayoutConfig::default(),
+        }));
+
+        ui.set_directory(dir.into());
+        reload(&ui, &state);
+
+        {
+            let ui_handle = ui.as_weak();
+            let state = state.clone();
+            ui.on_run_recipe(move |idx| {
+                if let Some(ui) = ui_handle.upgrade() {
+                    run_recipe(&ui, &state, idx as usize);
+                }
+            });
+        }
+        {
+            let state = state.clone();
+            ui.on_send_input(move |text| {
+                send_input(&state, text.to_string());
+            });
+        }
+
+        // `jam` has a parameter, so it should be in `param-recipes` (the
+        // inline-fields card list), not the plain `recipes` grid.
+        assert!(ui.get_recipes().iter().all(|r| r.name != "jam"));
+        let idx = ui
+            .get_param_recipes()
+            .iter()
+            .find(|r| r.name == "jam")
+            .expect("jam recipe should be in param-recipes")
+            .recipe_index;
+
+        // Leave PROFILE at its blank default and run -- this is what a
+        // user leaving the inline field empty and clicking Run does.
+        ui.invoke_run_recipe(idx);
+
+        let mut saw_prompt = false;
+        for _ in 0..50 {
+            poll_log(&ui, &state);
+            let log = ui.get_run_log().to_string();
+            if log.contains("profile>") && !saw_prompt {
+                saw_prompt = true;
+                ui.invoke_send_input("2".into());
+            }
+            if log.contains("chosen profile") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        let final_log = ui.get_run_log().to_string();
+        assert!(saw_prompt, "never saw the select prompt in run_log: {final_log:?}");
+        assert!(final_log.contains("chosen profile: fiber_backhaul"), "final log: {final_log:?}");
+
+        let _ = std::fs::remove_dir_all(&state.borrow().dir);
+    }
 }
 
 fn main() {

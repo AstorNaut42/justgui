@@ -109,26 +109,30 @@ for confirmation or other input — see
 
 ## The recipe grid
 
-Each recipe is a plain button showing just its name. The grid reflows to
-fit however wide you make the window.
+Recipes that take no parameters are plain buttons showing just their name,
+in a grid that reflows to fit however wide you make the window. Recipes
+that take one or more parameters get a full-width card below the grid
+instead, with a field per parameter shown inline (pre-filled with its
+default, if any) and a "Run" button — nothing is hidden behind a popup, so
+it's always visible what a recipe expects. Leaving an optional parameter
+blank and clicking Run is also how you hand control to a recipe that
+prompts for it interactively itself (e.g. a shebang recipe that falls back
+to a `select` menu when its parameter is empty) — the input box below the
+output panel is what you use to answer that prompt once it appears, same
+as any other running recipe. Variadic parameters (`*args` / `+args`) are
+entered as a single space-separated field.
 
-- **Run it**: click a button. If the recipe takes no parameters, it runs
-  immediately. If it does, clicking opens a small popover with a field per
-  parameter (pre-filled with its default, if any) and a "Run" button inside.
-  Variadic parameters (`*args` / `+args`) are entered as a single
-  space-separated field.
-- **See what it does**: hover over a button for its doc comment as a
-  tooltip.
+- **See what a grid button does**: hover over it for its doc comment as a
+  tooltip (parameter cards show the doc comment directly, no hover needed).
 - **Choose which recipes are shown**: click "Select recipes" above the
   grid — a checklist of every recipe in the justfile, plus a "Show hidden
   recipes" toggle to include private (`_`-prefixed or `[private]`) ones in
-  that list. Unchecked recipes just aren't in the grid at all — nothing sits
+  that list. Unchecked recipes just aren't shown at all — nothing sits
   there hidden-but-reserving-space.
-- **Reorder**: click a button's ⇄ handle (top-right corner) to pick it up,
-  then click another button to swap their positions. Click the picked-up
-  button again to cancel.
-- **Color a button**: click its 🎨 handle (top-left corner) and pick a
-  swatch.
+- **Reorder**: click a button's or card's ⇄ handle to pick it up, then click
+  another one to swap their positions. Click the picked-up one again to
+  cancel.
+- **Color a button or card**: click its 🎨 handle and pick a swatch.
 
 Selection, order, and color are saved automatically to
 `justgui.layout.toml` next to the justfile — a separate file from

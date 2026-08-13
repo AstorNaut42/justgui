@@ -10,7 +10,7 @@ mod theme;
 
 use just_client::{build_run_command, load_justfile, JustModel};
 use process::Process;
-use slint::{ModelRc, VecModel};
+use slint::{Model, ModelRc, VecModel};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -18,18 +18,43 @@ use theme::ThemeConfig;
 
 slint::include_modules!();
 
+/// One running (or finished-but-not-yet-dismissed) recipe invocation.
+/// Several can coexist so a long-lived recipe (e.g. one that starts an
+/// AppImage and stays up) doesn't block running anything else.
+struct Session {
+    id: i32,
+    recipe_name: String,
+    proc: Process,
+    log: String,
+    finished: bool, // true once its "[exit code N]" line has been appended
+}
+
 struct AppState {
     dir: String,
     model: JustModel,
     param_values: Vec<Vec<String>>, // per recipe, per param
-    run_proc: Process,
-    run_log: String,
-    running_recipe: String, // non-empty while `run_proc` output belongs to a run
+    sessions: Vec<Session>,
+    next_session_id: i32,
+    active_session: i32, // id of the session shown in the output panel; -1 = none
+    // The Slint-side session-tab model, mutated in place (see
+    // `sync_sessions_model`) rather than replaced wholesale on every poll
+    // tick -- replacing a `ModelRc` outright forces Slint's `for` repeater
+    // to tear down and rebuild every tab item, which (since `poll_sessions`
+    // runs every 50ms) can happen mid-click and silently swallow the click.
+    sessions_model: Rc<VecModel<RunSession>>,
+    // Same in-place-mutation reasoning as `sessions_model`: recipe tiles now
+    // reflect live running/needs-input state via `refresh_recipe_running_state`,
+    // called from the 50ms poll tick, so these can't be rebuilt wholesale
+    // either without risking the same click-swallowing bug.
+    recipes_model: Rc<VecModel<RecipeData>>,
+    param_recipes_model: Rc<VecModel<RecipeData>>,
     edit_dirty: bool,
     edit_status: String,
     theme: ThemeConfig,
     editing_theme: bool, // true while a live (unsaved) theme edit is in effect
     layout: layout::LayoutConfig,
+    last_linted_buffer: String, // edit-buffer text the linter last checked
+    edit_lint_error: String,
 }
 
 fn apply_theme(ui: &AppWindow, cfg: &ThemeConfig) {
@@ -103,15 +128,32 @@ fn recipe_data(st: &AppState, idx: usize) -> RecipeData {
             },
         })
         .collect();
+    // A running session of the same name -- visual feedback that clicking
+    // Run actually did something, and that this particular recipe (not just
+    // "something") is the one currently active.
+    let running_session = st.sessions.iter().find(|s| s.recipe_name == r.name && !s.finished);
     RecipeData {
         recipe_index: idx as i32,
         name: r.name.clone().into(),
         doc: r.doc.clone().into(),
         is_private: r.is_private,
         is_shown: entry.is_none_or(|e| e.shown),
+        is_running: running_session.is_some(),
+        needs_input: running_session.is_some_and(|s| termout::looks_like_prompt(&s.log)),
         color: theme::parse_color(entry.map_or(layout::PALETTE[0], |e| e.color.as_str())),
         params: ModelRc::new(VecModel::from(params)),
     }
+}
+
+/// Registers `st`'s persistent list models with the UI. Must be called once
+/// right after constructing both `ui` and `st` (before the first `reload`)
+/// -- everything after this mutates these models in place (see
+/// `sync_sessions_model`/`sync_recipe_model`) rather than ever calling
+/// `set_recipes`/`set_param_recipes`/`set_sessions` again.
+fn bind_models(ui: &AppWindow, st: &AppState) {
+    ui.set_recipes(ModelRc::from(st.recipes_model.clone()));
+    ui.set_param_recipes(ModelRc::from(st.param_recipes_model.clone()));
+    ui.set_sessions(ModelRc::from(st.sessions_model.clone()));
 }
 
 fn sync_ui(ui: &AppWindow, st: &AppState) {
@@ -155,14 +197,14 @@ fn sync_ui(ui: &AppWindow, st: &AppState) {
         .collect();
 
     ui.set_all_recipes(ModelRc::new(VecModel::from(all_recipes)));
-    ui.set_recipes(ModelRc::new(VecModel::from(recipes)));
-    ui.set_param_recipes(ModelRc::new(VecModel::from(param_recipes)));
+    sync_recipe_model(&st.recipes_model, &recipes);
+    sync_recipe_model(&st.param_recipes_model, &param_recipes);
     ui.set_load_error(st.model.error.clone().into());
     ui.set_justfile_path(st.model.justfile_path.clone().into());
     ui.set_edit_dirty(st.edit_dirty);
     ui.set_edit_status(st.edit_status.clone().into());
-    ui.set_run_log(st.run_log.clone().into());
-    ui.set_running(st.run_proc.running() || !st.running_recipe.is_empty());
+    ui.set_edit_lint_error(st.edit_lint_error.clone().into());
+    sync_sessions_ui(ui, st);
     ui.set_palette(ModelRc::new(VecModel::from(
         layout::PALETTE
             .iter()
@@ -171,6 +213,121 @@ fn sync_ui(ui: &AppWindow, st: &AppState) {
     )));
 
     sync_theme_ui(ui, &st.theme);
+}
+
+/// Updates `model` in place to match `desired`, using targeted
+/// insert/remove/`set_row_data` calls instead of `set_vec` -- `set_vec`
+/// (and replacing the `ModelRc` wholesale) sends Slint's `for` repeater a
+/// "reset" notification that tears down and rebuilds every row, which loses
+/// any in-progress interaction (e.g. a click whose press and release land on
+/// either side of a rebuild). `set_row_data` instead sends a targeted
+/// "this one row changed" notification that leaves untouched rows -- and
+/// their `TouchArea`s -- alone. Assumes `desired`'s relative order matches
+/// `model`'s for ids present in both, which holds here since sessions are
+/// only ever appended or removed, never reordered.
+fn sync_sessions_model(model: &VecModel<RunSession>, desired: &[RunSession]) {
+    let mut i = 0;
+    while i < model.row_count() {
+        let keep = model.row_data(i).is_some_and(|row| desired.iter().any(|s| s.id == row.id));
+        if keep {
+            i += 1;
+        } else {
+            model.remove(i);
+        }
+    }
+    for (i, want) in desired.iter().enumerate() {
+        match model.row_data(i) {
+            Some(have) if have.id == want.id => {
+                if have.name != want.name || have.running != want.running || have.needs_input != want.needs_input {
+                    model.set_row_data(i, want.clone());
+                }
+            }
+            _ => model.insert(i, want.clone()),
+        }
+    }
+}
+
+/// Same in-place-update reasoning as `sync_sessions_model`, applied to a
+/// recipe grid/card model -- rows are keyed by the stable `recipe_index`.
+fn sync_recipe_model(model: &VecModel<RecipeData>, desired: &[RecipeData]) {
+    let mut i = 0;
+    while i < model.row_count() {
+        let keep = model.row_data(i).is_some_and(|row| desired.iter().any(|d| d.recipe_index == row.recipe_index));
+        if keep {
+            i += 1;
+        } else {
+            model.remove(i);
+        }
+    }
+    for (i, want) in desired.iter().enumerate() {
+        match model.row_data(i) {
+            Some(have) if have.recipe_index == want.recipe_index => model.set_row_data(i, want.clone()),
+            _ => model.insert(i, want.clone()),
+        }
+    }
+}
+
+/// Refreshes just the is-running/needs-input flags on the recipe grid/card
+/// models to reflect current sessions -- called on the 50ms poll tick, so
+/// (like `sync_sessions_model`) it only touches rows whose state actually
+/// changed rather than rebuilding anything, to avoid swallowing a click
+/// that's mid-gesture on a tile's Run/reorder/color handle.
+fn refresh_recipe_running_state(st: &AppState) {
+    for model in [&st.recipes_model, &st.param_recipes_model] {
+        for i in 0..model.row_count() {
+            let Some(row) = model.row_data(i) else { continue };
+            let session = st.sessions.iter().find(|s| s.recipe_name == row.name.as_str() && !s.finished);
+            let is_running = session.is_some();
+            let needs_input = session.is_some_and(|s| termout::looks_like_prompt(&s.log));
+            if row.is_running != is_running || row.needs_input != needs_input {
+                let mut updated = row;
+                updated.is_running = is_running;
+                updated.needs_input = needs_input;
+                model.set_row_data(i, updated);
+            }
+        }
+    }
+}
+
+/// Pushes the session list and the active session's log/running state.
+/// Cheap enough to call on every poll tick (unlike the full `sync_ui`,
+/// which recomputes the recipe models too).
+fn sync_sessions_ui(ui: &AppWindow, st: &AppState) {
+    let sessions: Vec<RunSession> = st
+        .sessions
+        .iter()
+        .map(|s| RunSession {
+            id: s.id,
+            name: s.recipe_name.clone().into(),
+            running: !s.finished,
+            needs_input: !s.finished && termout::looks_like_prompt(&s.log),
+        })
+        .collect();
+    sync_sessions_model(&st.sessions_model, &sessions);
+    ui.set_active_session(st.active_session);
+
+    match st.sessions.iter().find(|s| s.id == st.active_session) {
+        Some(active) => {
+            ui.set_run_log(active.log.clone().into());
+            ui.set_running(!active.finished);
+            ui.set_needs_input(!active.finished && termout::looks_like_prompt(&active.log));
+        }
+        None => {
+            ui.set_run_log("".into());
+            ui.set_running(false);
+            ui.set_needs_input(false);
+        }
+    }
+}
+
+/// Drops any finished session other than the one currently shown in the
+/// output panel -- once you're not looking at a finished recipe's output
+/// anymore there's no reason to keep its tab around forever. The active
+/// session is exempt so its final output/exit code stays visible until you
+/// switch away or close it yourself.
+fn sweep_finished_sessions(st: &mut AppState) {
+    let active = st.active_session;
+    st.sessions.retain(|s| !s.finished || s.id == active);
 }
 
 fn reload(ui: &AppWindow, state: &Rc<RefCell<AppState>>) {
@@ -217,11 +374,11 @@ fn reload(ui: &AppWindow, state: &Rc<RefCell<AppState>>) {
     refresh_theme(ui, state);
 }
 
+/// Always starts a brand-new session rather than refusing when something
+/// else is already running -- recipes that need to stay running (e.g. one
+/// that starts an AppImage and stays up) shouldn't block anything else.
 fn run_recipe(ui: &AppWindow, state: &Rc<RefCell<AppState>>, idx: usize) {
     let mut st = state.borrow_mut();
-    if st.run_proc.running() {
-        return;
-    }
     let Some(recipe) = st.model.recipes.get(idx).cloned() else {
         return;
     };
@@ -230,34 +387,73 @@ fn run_recipe(ui: &AppWindow, state: &Rc<RefCell<AppState>>, idx: usize) {
     };
 
     let cmd = build_run_command(&recipe, &param_values);
-    st.run_log = format!("$ {cmd}\n");
-    st.running_recipe = recipe.name.clone();
     let dir = st.dir.clone();
-    st.run_proc.start(&cmd, &dir);
+    let mut proc = Process::new();
+    proc.start(&cmd, &dir);
 
-    ui.set_run_log(st.run_log.clone().into());
-    ui.set_running(true);
+    let id = st.next_session_id;
+    st.next_session_id += 1;
+    st.sessions.push(Session {
+        id,
+        recipe_name: recipe.name.clone(),
+        proc,
+        log: format!("$ {cmd}\n"),
+        finished: false,
+    });
+    st.active_session = id;
+
+    sweep_finished_sessions(&mut st);
+    sync_sessions_ui(ui, &st);
+    refresh_recipe_running_state(&st);
 }
 
-fn poll_log(ui: &AppWindow, state: &Rc<RefCell<AppState>>) {
+fn poll_sessions(ui: &AppWindow, state: &Rc<RefCell<AppState>>) {
     let mut st = state.borrow_mut();
-    if st.running_recipe.is_empty() && !st.run_proc.running() {
+    if st.sessions.is_empty() {
         return;
     }
 
-    let (chunk, finished) = st.run_proc.poll();
-    if !chunk.is_empty() {
-        termout::append_chunk(&mut st.run_log, &chunk);
-    }
-    if finished && !st.running_recipe.is_empty() {
-        let code = st.run_proc.exit_code();
-        st.run_log.push_str(&format!("\n[exit code {code}]\n"));
-        st.running_recipe.clear();
+    for session in st.sessions.iter_mut() {
+        if session.finished {
+            continue;
+        }
+        let (chunk, done) = session.proc.poll();
+        if !chunk.is_empty() {
+            termout::append_chunk(&mut session.log, &chunk);
+        }
+        if done {
+            let code = session.proc.exit_code();
+            session.log.push_str(&format!("\n[exit code {code}]\n"));
+            session.finished = true;
+        }
     }
 
-    let running = st.run_proc.running() || !st.running_recipe.is_empty();
-    ui.set_run_log(st.run_log.clone().into());
-    ui.set_running(running);
+    sweep_finished_sessions(&mut st);
+    sync_sessions_ui(ui, &st);
+    refresh_recipe_running_state(&st);
+}
+
+fn select_session(ui: &AppWindow, state: &Rc<RefCell<AppState>>, id: i32) {
+    let mut st = state.borrow_mut();
+    st.active_session = id;
+    sweep_finished_sessions(&mut st);
+    sync_sessions_ui(ui, &st);
+}
+
+/// Stops tracking/showing a session. This does not kill the underlying
+/// process if it's still running -- there's still no kill capability --
+/// its reader thread just keeps going, detached, until the child exits on
+/// its own (same as always happened when a new run replaced a previous
+/// `Process` in place, before sessions existed).
+fn close_session(ui: &AppWindow, state: &Rc<RefCell<AppState>>, id: i32) {
+    let mut st = state.borrow_mut();
+    st.sessions.retain(|s| s.id != id);
+    if st.active_session == id {
+        st.active_session = st.sessions.last().map(|s| s.id).unwrap_or(-1);
+    }
+    sweep_finished_sessions(&mut st);
+    sync_sessions_ui(ui, &st);
+    refresh_recipe_running_state(&st);
 }
 
 fn save_edit(ui: &AppWindow, state: &Rc<RefCell<AppState>>) {
@@ -294,20 +490,91 @@ fn save_edit(ui: &AppWindow, state: &Rc<RefCell<AppState>>) {
     ui.set_edit_status(status.into());
 }
 
-/// Sends a line to the running recipe's pty stdin. The pty's own line
-/// discipline echoes it back through the normal output stream (like a real
-/// terminal would), so it shows up in the log via the next `poll_log` --
-/// no need to echo it here ourselves.
-fn send_input(state: &Rc<RefCell<AppState>>, text: String) {
-    let st = state.borrow();
-    if !st.run_proc.running() {
+/// Re-lints the edit buffer (the *unsaved* text, not what's on disk) if
+/// it's changed since the last check -- called on a timer, so this is the
+/// short-circuit that keeps it from re-invoking `just` on every tick while
+/// the user isn't actively typing.
+fn lint_edit_buffer(ui: &AppWindow, state: &Rc<RefCell<AppState>>) {
+    let buffer = ui.get_edit_buffer().to_string();
+    let dir = {
+        let st = state.borrow();
+        if buffer == st.last_linted_buffer {
+            return;
+        }
+        st.dir.clone()
+    };
+    let error = just_client::lint_justfile(&buffer, &dir);
+    let mut st = state.borrow_mut();
+    st.last_linted_buffer = buffer;
+    st.edit_lint_error = error;
+    ui.set_edit_lint_error(st.edit_lint_error.clone().into());
+}
+
+/// Opens the justfile in $VISUAL/$EDITOR inside a separate terminal window
+/// (same editor-resolution convention `just --edit` uses). Doesn't try to
+/// embed the editor's output in our own window -- a TUI editor needs a
+/// real terminal, which this just hands off to entirely, so there's no
+/// rendering-fidelity concern the way there would be for a recipe's
+/// output. Best-effort: if no terminal emulator is found, this silently
+/// no-ops rather than failing loudly over what's a convenience.
+fn edit_externally(state: &Rc<RefCell<AppState>>) {
+    let path = state.borrow().model.justfile_path.clone();
+    if path.is_empty() {
         return;
     }
-    st.run_proc.send_input(&text);
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+
+    if cfg!(windows) {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "cmd", "/K", &editor, &path])
+            .spawn();
+        return;
+    }
+
+    const TERMINALS: &[(&str, &str)] = &[
+        ("x-terminal-emulator", "-e"),
+        ("gnome-terminal", "--"),
+        ("konsole", "-e"),
+        ("xterm", "-e"),
+    ];
+    for (term, flag) in TERMINALS {
+        if std::process::Command::new(term).arg(flag).arg(&editor).arg(&path).spawn().is_ok() {
+            return;
+        }
+    }
+}
+
+/// Sends a line to the active session's pty stdin. The pty's own line
+/// discipline echoes it back through the normal output stream (like a real
+/// terminal would), so it shows up in the log via the next `poll_sessions`
+/// -- no need to echo it here ourselves.
+fn send_input(state: &Rc<RefCell<AppState>>, text: String) {
+    let st = state.borrow();
+    let active = st.active_session;
+    if let Some(session) = st.sessions.iter().find(|s| s.id == active) {
+        if !session.finished {
+            session.proc.send_input(&text);
+        }
+    }
 }
 
 fn close_input(state: &Rc<RefCell<AppState>>) {
-    state.borrow().run_proc.close_input();
+    let st = state.borrow();
+    let active = st.active_session;
+    if let Some(session) = st.sessions.iter().find(|s| s.id == active) {
+        session.proc.close_input();
+    }
+}
+
+fn clear_log(ui: &AppWindow, state: &Rc<RefCell<AppState>>) {
+    let mut st = state.borrow_mut();
+    let active = st.active_session;
+    if let Some(session) = st.sessions.iter_mut().find(|s| s.id == active) {
+        session.log.clear();
+    }
+    ui.set_run_log("".into());
 }
 
 fn save_layout(ui: &AppWindow, state: &Rc<RefCell<AppState>>) {
@@ -420,6 +687,46 @@ fn save_theme(ui: &AppWindow, state: &Rc<RefCell<AppState>>) {
     ui.set_theme_status(status.into());
 }
 
+// Slint's real (winit) backend is thread-affine and can only be installed
+// once per process, but `cargo test` runs each test on its own thread by
+// default -- so any test that calls `AppWindow::new()` needs a platform
+// that doesn't care which thread it's on. `MinimalSoftwareWindow` is
+// exactly that (no real display/event loop needed), and installing it per
+// *thread* via `thread_local!` (rather than once process-wide) sidesteps
+// cross-test interference entirely: each test thread gets its own
+// independent fake window. This mirrors the pattern Slint's own test
+// suite uses (`tests/common/mod.rs` in the `slint` crate).
+#[cfg(test)]
+mod test_support {
+    use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
+    use slint::platform::{Platform, PlatformError, WindowAdapter};
+    use slint::PhysicalSize;
+    use std::rc::Rc;
+
+    thread_local! {
+        static WINDOW: Rc<MinimalSoftwareWindow> =
+            MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+    }
+
+    struct TestPlatform;
+    impl Platform for TestPlatform {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
+            Ok(WINDOW.with(|w| w.clone()))
+        }
+    }
+
+    /// Installs the software-rendering test platform for the current
+    /// thread (idempotent -- `.ok()` swallows the "already set" error a
+    /// second call on the same thread would otherwise return) and returns
+    /// its window, sized to the app's normal default.
+    pub fn setup() -> Rc<MinimalSoftwareWindow> {
+        slint::platform::set_platform(Box::new(TestPlatform)).ok();
+        let window = WINDOW.with(|w| w.clone());
+        window.set_size(PhysicalSize::new(1000, 700));
+        window
+    }
+}
+
 #[cfg(test)]
 mod integration_tests {
     use super::*;
@@ -434,6 +741,7 @@ mod integration_tests {
     /// recipe's own prompt through the input box).
     #[test]
     fn recipe_with_blank_param_reaches_its_own_interactive_prompt() {
+        test_support::setup();
         let dir = std::env::temp_dir().join(format!("justgui-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -461,15 +769,21 @@ mod integration_tests {
             dir: dir.clone(),
             model: JustModel::default(),
             param_values: Vec::new(),
-            run_proc: Process::new(),
-            run_log: String::new(),
-            running_recipe: String::new(),
+            sessions: Vec::new(),
+            next_session_id: 0,
+            active_session: -1,
+            sessions_model: Rc::new(VecModel::default()),
+            recipes_model: Rc::new(VecModel::default()),
+            param_recipes_model: Rc::new(VecModel::default()),
             edit_dirty: false,
             edit_status: String::new(),
             theme: ThemeConfig::default(),
             editing_theme: false,
             layout: layout::LayoutConfig::default(),
+            last_linted_buffer: String::new(),
+            edit_lint_error: String::new(),
         }));
+        bind_models(&ui, &state.borrow());
 
         ui.set_directory(dir.into());
         reload(&ui, &state);
@@ -506,7 +820,7 @@ mod integration_tests {
 
         let mut saw_prompt = false;
         for _ in 0..50 {
-            poll_log(&ui, &state);
+            poll_sessions(&ui, &state);
             let log = ui.get_run_log().to_string();
             if log.contains("profile>") && !saw_prompt {
                 saw_prompt = true;
@@ -524,22 +838,126 @@ mod integration_tests {
 
         let _ = std::fs::remove_dir_all(&state.borrow().dir);
     }
+
+    /// Starting a second recipe while a long-lived one is still running
+    /// must not be blocked -- this is the whole point of sessions (the
+    /// user's example: a recipe that starts an AppImage and stays up).
+    #[test]
+    fn a_long_running_recipe_does_not_block_starting_another() {
+        test_support::setup();
+        let dir = std::env::temp_dir().join(format!("justgui-sessions-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("justfile"),
+            "stay-up:\n    sleep 5\n\nquick:\n    echo quick done\n",
+        )
+        .unwrap();
+        let dir = dir.to_string_lossy().into_owned();
+
+        let ui = AppWindow::new().expect("failed to create Slint window");
+        let state = Rc::new(RefCell::new(AppState {
+            dir: dir.clone(),
+            model: JustModel::default(),
+            param_values: Vec::new(),
+            sessions: Vec::new(),
+            next_session_id: 0,
+            active_session: -1,
+            sessions_model: Rc::new(VecModel::default()),
+            recipes_model: Rc::new(VecModel::default()),
+            param_recipes_model: Rc::new(VecModel::default()),
+            edit_dirty: false,
+            edit_status: String::new(),
+            theme: ThemeConfig::default(),
+            editing_theme: false,
+            layout: layout::LayoutConfig::default(),
+            last_linted_buffer: String::new(),
+            edit_lint_error: String::new(),
+        }));
+        bind_models(&ui, &state.borrow());
+        ui.set_directory(dir.clone().into());
+        reload(&ui, &state);
+        {
+            let ui_handle = ui.as_weak();
+            let state = state.clone();
+            ui.on_run_recipe(move |idx| {
+                if let Some(ui) = ui_handle.upgrade() {
+                    run_recipe(&ui, &state, idx as usize);
+                }
+            });
+        }
+        {
+            let ui_handle = ui.as_weak();
+            let state = state.clone();
+            ui.on_select_session(move |id| {
+                if let Some(ui) = ui_handle.upgrade() {
+                    select_session(&ui, &state, id);
+                }
+            });
+        }
+        {
+            let ui_handle = ui.as_weak();
+            let state = state.clone();
+            ui.on_close_session(move |id| {
+                if let Some(ui) = ui_handle.upgrade() {
+                    close_session(&ui, &state, id);
+                }
+            });
+        }
+
+        let stay_up_idx = state.borrow().model.recipes.iter().position(|r| r.name == "stay-up").unwrap();
+        let quick_idx = state.borrow().model.recipes.iter().position(|r| r.name == "quick").unwrap();
+
+        ui.invoke_run_recipe(stay_up_idx as i32);
+        assert_eq!(state.borrow().sessions.len(), 1);
+        assert!(state.borrow().sessions[0].proc.running());
+
+        // Starting a second recipe while the first is still running must
+        // succeed, not be silently dropped.
+        ui.invoke_run_recipe(quick_idx as i32);
+        assert_eq!(state.borrow().sessions.len(), 2, "second recipe should have started its own session");
+
+        let quick_id = state.borrow().sessions[1].id;
+        assert_eq!(ui.get_active_session(), quick_id, "starting a session should make it active");
+
+        for _ in 0..50 {
+            poll_sessions(&ui, &state);
+            if ui.get_run_log().contains("quick done") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(ui.get_run_log().contains("quick done"), "log: {:?}", ui.get_run_log());
+
+        // The long-lived one should still be running, undisturbed.
+        assert!(state.borrow().sessions.iter().find(|s| s.recipe_name == "stay-up").unwrap().proc.running());
+
+        // Switching back to it should show its own log, not the quick one's.
+        let stay_up_id = state.borrow().sessions[0].id;
+        ui.invoke_select_session(stay_up_id);
+        assert!(!ui.get_run_log().contains("quick done"));
+        assert_eq!(ui.get_active_session(), stay_up_id);
+
+        // The finished "quick" session is no longer the active one, so it
+        // should have been swept away automatically -- no need to keep a
+        // finished recipe's tab around once you're not looking at it.
+        assert_eq!(state.borrow().sessions.len(), 1, "finished, inactive session should auto-close");
+        assert_eq!(state.borrow().sessions[0].id, stay_up_id);
+
+        // Closing a still-running session should just stop tracking it,
+        // not hang or panic.
+        ui.invoke_close_session(stay_up_id);
+        assert_eq!(state.borrow().sessions.len(), 0);
+
+        let _ = std::fs::remove_dir_all(&state.borrow().dir);
+    }
 }
 
 #[cfg(test)]
 mod render_tests {
     use super::*;
-    use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
-    use slint::platform::{Platform, PlatformError, WindowAdapter};
+    use slint::platform::software_renderer::MinimalSoftwareWindow;
     use slint::{PhysicalSize, Rgb8Pixel};
     use std::rc::Rc;
-
-    struct TestPlatform(Rc<MinimalSoftwareWindow>);
-    impl Platform for TestPlatform {
-        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
-            Ok(self.0.clone())
-        }
-    }
 
     /// Renders `ui` (already constructed/populated) into an RGB8 buffer at
     /// `width`x`height` via Slint's software renderer -- no real display or
@@ -584,8 +1002,7 @@ mod render_tests {
     /// actual rendered pixels does.
     #[test]
     fn recipe_output_is_visibly_rendered_not_just_populated() {
-        let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
-        slint::platform::set_platform(Box::new(TestPlatform(window.clone()))).ok();
+        let window = test_support::setup();
 
         let dir = std::env::temp_dir().join(format!("justgui-render-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -597,15 +1014,21 @@ mod render_tests {
             dir: dir.clone(),
             model: JustModel::default(),
             param_values: Vec::new(),
-            run_proc: Process::new(),
-            run_log: String::new(),
-            running_recipe: String::new(),
+            sessions: Vec::new(),
+            next_session_id: 0,
+            active_session: -1,
+            sessions_model: Rc::new(VecModel::default()),
+            recipes_model: Rc::new(VecModel::default()),
+            param_recipes_model: Rc::new(VecModel::default()),
             edit_dirty: false,
             edit_status: String::new(),
             theme: ThemeConfig::default(),
             editing_theme: false,
             layout: layout::LayoutConfig::default(),
+            last_linted_buffer: String::new(),
+            edit_lint_error: String::new(),
         }));
+        bind_models(&ui, &state.borrow());
         ui.set_directory(dir.clone().into());
         reload(&ui, &state);
         {
@@ -621,7 +1044,7 @@ mod render_tests {
         let idx = state.borrow().model.recipes.iter().position(|r| r.name == "build").unwrap();
         ui.invoke_run_recipe(idx as i32);
         for _ in 0..30 {
-            poll_log(&ui, &state);
+            poll_sessions(&ui, &state);
             if ui.get_run_log().contains("hello world from build") {
                 break;
             }
@@ -651,6 +1074,111 @@ mod render_tests {
 
         let _ = std::fs::remove_dir_all(&state.borrow().dir);
     }
+
+    /// Regression test for a bug where `poll_sessions` rebuilt the entire
+    /// session-tab list model from scratch (`ui.set_sessions(ModelRc::new(...))`)
+    /// on every 50ms tick, even when nothing had changed. Slint's `for`
+    /// repeater treats a new `ModelRc` identity as a full reset and tears
+    /// down/rebuilds every tab item, including whichever `TouchArea` a
+    /// real mouse click's press landed on -- so any click whose release
+    /// happened to land after the next tick (i.e. essentially every real
+    /// click) got silently swallowed. `invoke_select_session` alone
+    /// wouldn't have caught this: it calls the Rust callback directly and
+    /// skips hit-testing entirely. This dispatches real
+    /// `WindowEvent::Pointer*` events -- the same path an actual mouse
+    /// click takes -- with a `poll_sessions` call spliced in between press
+    /// and release, exactly like the real 50ms timer would during a click.
+    #[test]
+    fn session_tab_click_survives_a_poll_tick_between_press_and_release() {
+        let window = test_support::setup();
+
+        let dir = std::env::temp_dir().join(format!("justgui-click-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("justfile"), "stay-up:\n    sleep 5\n\nquick:\n    echo quick done\n").unwrap();
+        let dir = dir.to_string_lossy().into_owned();
+
+        let ui = AppWindow::new().expect("failed to create Slint window");
+        let state = Rc::new(RefCell::new(AppState {
+            dir: dir.clone(),
+            model: JustModel::default(),
+            param_values: Vec::new(),
+            sessions: Vec::new(),
+            next_session_id: 0,
+            active_session: -1,
+            sessions_model: Rc::new(VecModel::default()),
+            recipes_model: Rc::new(VecModel::default()),
+            param_recipes_model: Rc::new(VecModel::default()),
+            edit_dirty: false,
+            edit_status: String::new(),
+            theme: ThemeConfig::default(),
+            editing_theme: false,
+            layout: layout::LayoutConfig::default(),
+            last_linted_buffer: String::new(),
+            edit_lint_error: String::new(),
+        }));
+        bind_models(&ui, &state.borrow());
+        ui.set_directory(dir.clone().into());
+        reload(&ui, &state);
+        {
+            let ui_handle = ui.as_weak();
+            let state = state.clone();
+            ui.on_run_recipe(move |idx| {
+                if let Some(ui) = ui_handle.upgrade() {
+                    run_recipe(&ui, &state, idx as usize);
+                }
+            });
+        }
+        {
+            let ui_handle = ui.as_weak();
+            let state = state.clone();
+            ui.on_select_session(move |id| {
+                if let Some(ui) = ui_handle.upgrade() {
+                    select_session(&ui, &state, id);
+                }
+            });
+        }
+
+        let stay_up_idx = state.borrow().model.recipes.iter().position(|r| r.name == "stay-up").unwrap();
+        let quick_idx = state.borrow().model.recipes.iter().position(|r| r.name == "quick").unwrap();
+        ui.invoke_run_recipe(stay_up_idx as i32);
+        ui.invoke_run_recipe(quick_idx as i32);
+        assert_eq!(ui.get_active_session(), state.borrow().sessions[1].id, "quick should start active");
+
+        let (width, height) = (1000u32, 700u32);
+        let _ = render(&window, width, height);
+
+        // The session-tab strip sits directly below the Recipes/Edit-justfile
+        // tab widget in the default 1000x700 window; (20, 365) lands inside
+        // the first (leftmost) tab's select area, clear of its neighboring
+        // close (x) button. If the layout changes meaningfully this may need
+        // adjusting (see `recipe_output_is_visibly_rendered_not_just_populated`
+        // above for the same tradeoff).
+        use slint::platform::{PointerEventButton, WindowEvent};
+        use slint::LogicalPosition;
+        let click_x = 20.0f32;
+        let mid_y = 365.0f32;
+        ui.window().dispatch_event(WindowEvent::PointerMoved { position: LogicalPosition::new(click_x, mid_y) });
+        ui.window().dispatch_event(WindowEvent::PointerPressed {
+            position: LogicalPosition::new(click_x, mid_y),
+            button: PointerEventButton::Left,
+        });
+        // A real click's press-to-release span routinely crosses at least
+        // one 50ms tick -- simulate that explicitly.
+        poll_sessions(&ui, &state);
+        ui.window().dispatch_event(WindowEvent::PointerReleased {
+            position: LogicalPosition::new(click_x, mid_y),
+            button: PointerEventButton::Left,
+        });
+
+        let first_session_id = state.borrow().sessions[0].id;
+        assert_eq!(
+            ui.get_active_session(),
+            first_session_id,
+            "clicking the first tab should have selected it despite a poll tick between press and release"
+        );
+
+        let _ = std::fs::remove_dir_all(&state.borrow().dir);
+    }
 }
 
 fn main() {
@@ -666,15 +1194,21 @@ fn main() {
         dir: dir.clone(),
         model: JustModel::default(),
         param_values: Vec::new(),
-        run_proc: Process::new(),
-        run_log: String::new(),
-        running_recipe: String::new(),
+        sessions: Vec::new(),
+        next_session_id: 0,
+        active_session: -1,
+        sessions_model: Rc::new(VecModel::default()),
+        recipes_model: Rc::new(VecModel::default()),
+        param_recipes_model: Rc::new(VecModel::default()),
         edit_dirty: false,
         edit_status: String::new(),
         theme: ThemeConfig::default(),
         editing_theme: false,
         layout: layout::LayoutConfig::default(),
+        last_linted_buffer: String::new(),
+        edit_lint_error: String::new(),
     }));
+    bind_models(&ui, &state.borrow());
 
     ui.set_directory(dir.into());
     reload(&ui, &state);
@@ -738,9 +1272,8 @@ fn main() {
         let ui_handle = ui.as_weak();
         let state = state.clone();
         ui.on_clear_log(move || {
-            state.borrow_mut().run_log.clear();
             if let Some(ui) = ui_handle.upgrade() {
-                ui.set_run_log("".into());
+                clear_log(&ui, &state);
             }
         });
     }
@@ -756,6 +1289,33 @@ fn main() {
         let state = state.clone();
         ui.on_close_input(move || {
             close_input(&state);
+        });
+    }
+
+    {
+        let ui_handle = ui.as_weak();
+        let state = state.clone();
+        ui.on_select_session(move |id| {
+            if let Some(ui) = ui_handle.upgrade() {
+                select_session(&ui, &state, id);
+            }
+        });
+    }
+
+    {
+        let ui_handle = ui.as_weak();
+        let state = state.clone();
+        ui.on_close_session(move |id| {
+            if let Some(ui) = ui_handle.upgrade() {
+                close_session(&ui, &state, id);
+            }
+        });
+    }
+
+    {
+        let state = state.clone();
+        ui.on_edit_externally(move || {
+            edit_externally(&state);
         });
     }
 
@@ -839,7 +1399,7 @@ fn main() {
             Duration::from_millis(50),
             move || {
                 if let Some(ui) = ui_handle.upgrade() {
-                    poll_log(&ui, &state);
+                    poll_sessions(&ui, &state);
                 }
             },
         );
@@ -855,6 +1415,21 @@ fn main() {
             move || {
                 if let Some(ui) = ui_handle.upgrade() {
                     refresh_theme(&ui, &state);
+                }
+            },
+        );
+    }
+
+    let lint_timer = slint::Timer::default();
+    {
+        let ui_handle = ui.as_weak();
+        let state = state.clone();
+        lint_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(600),
+            move || {
+                if let Some(ui) = ui_handle.upgrade() {
+                    lint_edit_buffer(&ui, &state);
                 }
             },
         );

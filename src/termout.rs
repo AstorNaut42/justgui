@@ -25,6 +25,25 @@ pub fn append_chunk(log: &mut String, chunk: &str) {
     }
 }
 
+/// Best-effort guess that a still-running recipe is blocked waiting on
+/// input (a password prompt, a `[y/N]` confirmation, a `select`-menu
+/// prompt) rather than just being slow. There's no real terminal-state
+/// introspection here (no light dependency offers that) -- just a heuristic
+/// over the last, still-unterminated line of output: if it mentions
+/// "password"/"passphrase", or ends in `:`, `?`, `>` or `]` (common prompt
+/// punctuation), it's probably sitting there waiting on a reply.
+pub fn looks_like_prompt(log: &str) -> bool {
+    let tail = log.rsplit('\n').next().unwrap_or("").trim_end();
+    if tail.is_empty() {
+        return false;
+    }
+    let lower = tail.to_ascii_lowercase();
+    if lower.contains("password") || lower.contains("passphrase") {
+        return true;
+    }
+    matches!(tail.chars().last(), Some(':' | '?' | '>' | ']'))
+}
+
 fn consume_escape(chars: &mut std::iter::Peekable<std::str::Chars>) {
     match chars.peek() {
         Some('[') => {
@@ -94,5 +113,20 @@ mod tests {
     #[test]
     fn ansi_osc_title_sequence_is_stripped_without_eating_following_text() {
         assert_eq!(run("\x1b]0;window title\x07after\n"), "after\n");
+    }
+
+    #[test]
+    fn recognizes_common_prompt_shapes() {
+        assert!(looks_like_prompt("[sudo] password for dan: "));
+        assert!(looks_like_prompt("Continue? [y/N] "));
+        assert!(looks_like_prompt("profile> "));
+        assert!(looks_like_prompt("some prior line\nEnter passphrase:"));
+    }
+
+    #[test]
+    fn does_not_flag_ordinary_output() {
+        assert!(!looks_like_prompt("Building project...\n"));
+        assert!(!looks_like_prompt(""));
+        assert!(!looks_like_prompt("Building project"));
     }
 }

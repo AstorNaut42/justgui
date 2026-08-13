@@ -131,6 +131,39 @@ pub fn load_justfile(dir: &str) -> JustModel {
     model
 }
 
+/// Validates `buffer` (typically the *unsaved* editor content, not what's
+/// on disk) by piping it through `just --justfile - --dump --dump-format
+/// json` in `dir` -- reuses the same "just is the parser" approach
+/// `load_justfile` relies on. Returns an empty string if it parses
+/// cleanly, or `just`'s error message otherwise. Never fatal: any failure
+/// to even launch `just` just reports no error, rather than blocking
+/// editing over a linting hiccup.
+pub fn lint_justfile(buffer: &str, dir: &str) -> String {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = match Command::new("just")
+        .args(["--justfile", "-", "--dump", "--dump-format", "json"])
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(buffer.as_bytes());
+    } // dropped here, sending EOF
+
+    match child.wait_with_output() {
+        Ok(o) if !o.status.success() => String::from_utf8_lossy(&o.stderr).trim().to_string(),
+        _ => String::new(),
+    }
+}
+
 /// Quotes `arg` so it survives being passed through `/bin/sh -c` (POSIX)
 /// or `cmd.exe /c` (Windows) as a single token.
 pub fn shell_quote(arg: &str) -> String {
@@ -206,4 +239,20 @@ pub fn build_run_command(recipe: &JustRecipe, param_values: &[String]) -> String
         }
     }
     cmd
+}
+
+#[cfg(test)]
+mod lint_tests {
+    use super::*;
+
+    #[test]
+    fn lint_justfile_accepts_valid_syntax() {
+        assert_eq!(lint_justfile("build:\n    echo hi\n", "."), "");
+    }
+
+    #[test]
+    fn lint_justfile_reports_invalid_syntax() {
+        let error = lint_justfile("this is not a justfile\n", ".");
+        assert!(!error.is_empty(), "expected a lint error for invalid syntax");
+    }
 }

@@ -30,8 +30,17 @@ export struct RecipeData {
     doc: string,
     is-private: bool,
     is-shown: bool,
+    is-running: bool,
+    needs-input: bool,
     color: color,
     params: [ParamData],
+}
+
+export struct RunSession {
+    id: int,
+    name: string,
+    running: bool,
+    needs-input: bool,
 }
 
 export component AppWindow inherits Window {
@@ -62,8 +71,10 @@ export component AppWindow inherits Window {
     in property <string> load-error;
     in property <string> run-log;
     in property <bool> running;
+    in property <bool> needs-input; // best-effort guess the active session is blocked on a prompt
     in property <bool> edit-dirty;
     in property <string> edit-status;
+    in property <string> edit-lint-error;
     in property <string> justfile-path;
     in property <[color]> palette;
     in property <string> theme-status;
@@ -71,6 +82,8 @@ export component AppWindow inherits Window {
     in property <int> theme-font-size;
     in property <string> theme-font-family;
     in property <bool> theme-dark-mode;
+    in property <[RunSession]> sessions;
+    in property <int> active-session: -1;
 
     // Which recipe (by recipe-index) is currently "picked up" to be moved;
     // -1 means nothing is picked up. Purely local UI state, not persisted --
@@ -92,6 +105,9 @@ export component AppWindow inherits Window {
     callback set-theme-color(string, color);
     callback set-theme-field(string, string);
     callback save-theme();
+    callback select-session(int);
+    callback close-session(int);
+    callback edit-externally();
 
     VerticalLayout {
         padding: 8px;
@@ -287,7 +303,9 @@ export component AppWindow inherits Window {
                                     y: floor(i / cols) * (tile-h + gap) + gap;
                                     width: tile-w;
                                     height: tile-h;
-                                    background: recipe.color;
+                                    background: recipe.needs-input ? recipe.color.mix(Theme.warning, 0.6)
+                                        : recipe.is-running ? recipe.color.darker(0.3)
+                                        : recipe.color;
                                     border-radius: Theme.corner-radius;
                                     border-width: root.reordering-recipe-index == recipe.recipe-index ? 3px : 0px;
                                     border-color: Theme.text;
@@ -388,7 +406,9 @@ export component AppWindow inherits Window {
                             for recipe[i] in root.param-recipes : Rectangle {
                                 width: recipes-scroll.visible-width;
                                 height: 76px + recipe.params.length * 38px;
-                                background: recipe.color;
+                                background: recipe.needs-input ? recipe.color.mix(Theme.warning, 0.6)
+                                    : recipe.is-running ? recipe.color.darker(0.3)
+                                    : recipe.color;
                                 border-radius: Theme.corner-radius;
                                 border-width: root.reordering-recipe-index == recipe.recipe-index ? 3px : 0px;
                                 border-color: Theme.text;
@@ -459,7 +479,6 @@ export component AppWindow inherits Window {
 
                                     Button {
                                         text: "Run";
-                                        enabled: !root.running;
                                         clicked => { root.run-recipe(recipe.recipe-index); }
                                     }
                                 }
@@ -487,7 +506,14 @@ export component AppWindow inherits Window {
                         spacing: 6px;
                         Button { text: "Save"; enabled: root.justfile-path != ""; clicked => { root.save-edit(); } }
                         Button { text: "Reload from disk"; clicked => { root.reload(); } }
+                        Button { text: "Edit externally"; enabled: root.justfile-path != ""; clicked => { root.edit-externally(); } }
                         Text { text: root.edit-status; color: Theme.muted-text; vertical-alignment: center; }
+                    }
+
+                    if root.edit-lint-error != "" : Text {
+                        text: root.edit-lint-error;
+                        color: Theme.error;
+                        wrap: word-wrap;
                     }
 
                     Rectangle { height: 1px; background: Theme.border; }
@@ -497,6 +523,42 @@ export component AppWindow inherits Window {
                         vertical-stretch: 1;
                         font-family: "monospace";
                         edited(t) => { root.edit-touched(); }
+                    }
+                }
+            }
+        }
+
+        if root.sessions.length > 0 : HorizontalLayout {
+            spacing: 4px;
+            alignment: start;
+            for session[_] in root.sessions : Rectangle {
+                horizontal-stretch: 0;
+                background: session.needs-input ? Theme.warning
+                    : session.id == root.active-session ? Theme.accent
+                    : Theme.panel-background;
+                border-radius: Theme.corner-radius;
+                HorizontalLayout {
+                    padding: 4px;
+                    spacing: 4px;
+                    TouchArea {
+                        horizontal-stretch: 0;
+                        clicked => { root.select-session(session.id); }
+                        Text {
+                            text: (session.needs-input ? "⚠ " : session.running ? "● " : "") + session.name;
+                            color: session.needs-input ? Theme.background
+                                : session.id == root.active-session ? Theme.background
+                                : Theme.text;
+                        }
+                    }
+                    TouchArea {
+                        width: 14px;
+                        clicked => { root.close-session(session.id); }
+                        Text {
+                            text: "×";
+                            color: session.needs-input ? Theme.background
+                                : session.id == root.active-session ? Theme.background
+                                : Theme.text;
+                        }
                     }
                 }
             }
@@ -551,11 +613,19 @@ export component AppWindow inherits Window {
             }
         }
 
+        if root.needs-input : Text {
+            text: "⚠ the running recipe looks like it's waiting for input (e.g. a password or confirmation prompt)";
+            color: Theme.warning;
+            wrap: word-wrap;
+        }
+
         HorizontalLayout {
             spacing: 6px;
             LineEdit {
                 text <=> root.stdin-text;
-                placeholder-text: "Input for the running recipe -- Enter to send";
+                placeholder-text: root.needs-input
+                    ? "Recipe may be waiting for input -- type your answer and press Enter"
+                    : "Input for the running recipe -- Enter to send";
                 enabled: root.running;
                 horizontal-stretch: 1;
                 accepted(t) => { root.send-input(t); root.stdin-text = ""; }

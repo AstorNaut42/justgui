@@ -96,16 +96,17 @@ That's it — a window opens with:
 
 - **Recipes tab**: a grid of buttons, one per recipe you've chosen to show
   (see [The recipe grid](#the-recipe-grid) below).
-- **Edit justfile tab**: the raw justfile as text, with Save and "Reload
-  from disk" buttons.
+- **Edit justfile tab**: the raw justfile as text — see
+  [Editing the justfile](#editing-the-justfile).
 
 A "Transparency" slider and a "Theme" button sit above the tabs — see
 [Transparency and the theme editor](#transparency-and-the-theme-editor).
 
-Output from whichever recipe you last ran streams live in the panel at the
-bottom of the window, with an input field below it for recipes that prompt
-for confirmation or other input — see
-[Live output and input](#live-output-and-input).
+Every recipe you run gets its own session, so several can run at once —
+see [Live output and input](#live-output-and-input). Output from whichever
+session is active streams live in the panel at the bottom of the window,
+with an input field below it for recipes that prompt for confirmation or
+other input.
 
 ## The recipe grid
 
@@ -124,6 +125,9 @@ entered as a single space-separated field.
 
 - **See what a grid button does**: hover over it for its doc comment as a
   tooltip (parameter cards show the doc comment directly, no hover needed).
+- **See that it's running**: a button or card darkens while it has an active
+  session, and turns a warning color if that session looks like it's
+  blocked on a prompt (see [Live output and input](#live-output-and-input)).
 - **Choose which recipes are shown**: click "Select recipes" above the
   grid — a checklist of every recipe in the justfile, plus a "Show hidden
   recipes" toggle to include private (`_`-prefixed or `[private]`) ones in
@@ -165,15 +169,42 @@ Recipes run attached to a real pseudo-terminal (via
 that's what makes `sudo`, `ssh`, and anything else that insists on a real
 controlling terminal before prompting actually work here. The output panel
 at the bottom streams a running recipe's output live. Below it, the input
-field (enabled only while something is running) sends a line of text when
-you press Enter or click "Send" — this is what lets a recipe that does
-something like `read -p "Continue? [y/N] "`, or `sudo` asking for your
-password, actually receive your answer. What you send shows up in the
-output panel because the pty itself echoes it back, the same way a real
-terminal would — justgui doesn't synthesize that.
+field (enabled only while the active session is running) sends a line of
+text when you press Enter or click "Send" — this is what lets a recipe
+that does something like `read -p "Continue? [y/N] "`, or `sudo` asking
+for your password, actually receive your answer. What you send shows up
+in the output panel because the pty itself echoes it back, the same way a
+real terminal would — justgui doesn't synthesize that.
+
+Since output can't tell you *when* a recipe is actually blocked waiting on
+a reply, justgui makes a best-effort guess: if a session's output ends on
+an unterminated line that mentions "password"/"passphrase", or ends in
+`:`, `?`, `>` or `]` (the shapes a password prompt, a `[y/N]` confirmation,
+or a `select`-menu prompt tend to take), that session's tab, its recipe's
+grid button/card, and the input row all switch to a warning color with a
+short "may be waiting for input" note. It's a heuristic over plain text,
+not real terminal-state introspection, so it can be wrong in both
+directions — treat it as a hint to go check, not a guarantee.
 
 - **Collapse it**: click the "Output" row to hide/show the panel.
 - **Resize it**: drag the thin bar just above the panel up or down.
+
+Every time you run a recipe it gets its own session, so a recipe that
+needs to stay running (starting a background service, an AppImage, a dev
+server) doesn't block you from running anything else. A row of session
+tabs appears above the output panel once you've run something:
+
+- **Switch which one you're looking at**: click a tab. A dot marks the
+  ones still running.
+- **Dismiss one**: click its ×. This only stops justgui from tracking and
+  showing it — it does **not** kill the underlying process if it's still
+  running (there's currently no way to kill a running process outright).
+- **Finished ones clean themselves up**: once a session's recipe exits and
+  you're no longer looking at it (you've switched to another tab, or
+  started a new recipe), its tab disappears on its own — there's no need
+  to manually dismiss every one-off recipe you run. The session you're
+  currently viewing is the only exception: it sticks around, exit code and
+  all, until you switch away or close it yourself.
 
 Output is plain text: ANSI color and cursor-control codes are stripped
 rather than rendered (no colored text, and a full-screen/curses-style
@@ -183,8 +214,7 @@ rather than showing every intermediate update. A recipe's stdin stays open
 for the life of the process instead of getting an immediate EOF, so a
 recipe that reads-to-EOF without prompting (e.g. piping through `cat` with
 no input) can hang where it wouldn't have before — click "Close input" to
-send EOF and unstick it; there is currently no way to kill a running
-process outright.
+send EOF and unstick it.
 
 You can also point it at a different directory without `cd`-ing:
 
@@ -194,6 +224,27 @@ justgui /path/to/other/project
 
 Or retarget it live, without restarting, using the "Directory" field and
 "Reload" button at the top of the window.
+
+## Editing the justfile
+
+The "Edit justfile" tab is a plain text editor for the raw justfile, with
+Save and "Reload from disk" buttons. As you type, justgui pipes the
+*unsaved* buffer through `just` on a debounce timer and shows a parse
+error inline if it doesn't parse — the same way `just --dump` is already
+used everywhere else, just against your in-progress edit instead of what's
+on disk.
+
+There's no vim mode or other modal editing here — Slint's text editor
+widget doesn't have hooks for that, and there's no existing crate to build
+one from, so it isn't a small addition. Instead, "Edit externally" opens
+the justfile in your `$VISUAL`/`$EDITOR` (same convention `just --edit`
+itself uses) inside a separate terminal window, so a real editor — vim,
+whatever you use — handles it natively with no rendering limitations, and
+you use "Reload from disk" here once you save and quit. Justgui tries a
+short list of common Linux terminal emulators
+(`x-terminal-emulator`/`gnome-terminal`/`konsole`/`xterm`) and a
+`cmd`-based fallback on Windows; if none of those are found it silently
+does nothing. macOS isn't covered.
 
 ## Styling
 
@@ -215,8 +266,9 @@ settings from inside the running app — see
 
 ## Notes / limitations
 
-- Editing the justfile writes the raw text back to disk with no validation;
-  if the result doesn't parse, `just`'s error shows up in the Recipes tab.
+- Live linting (see [Editing the justfile](#editing-the-justfile)) warns
+  you as you type, but Save still writes whatever's in the buffer
+  regardless — it doesn't block saving invalid syntax.
 - The recipe list is fetched fresh from `just` on load/reload, not
   file-watched — hit "Reload" after editing the justfile externally (this is
   separate from styling, which *is* watched live; see [Styling](#styling)).

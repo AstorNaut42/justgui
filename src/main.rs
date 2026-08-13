@@ -526,6 +526,133 @@ mod integration_tests {
     }
 }
 
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
+    use slint::platform::{Platform, PlatformError, WindowAdapter};
+    use slint::{PhysicalSize, Rgb8Pixel};
+    use std::rc::Rc;
+
+    struct TestPlatform(Rc<MinimalSoftwareWindow>);
+    impl Platform for TestPlatform {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// Renders `ui` (already constructed/populated) into an RGB8 buffer at
+    /// `width`x`height` via Slint's software renderer -- no real display or
+    /// window manager needed, just a `MinimalSoftwareWindow` test platform.
+    fn render(window: &Rc<MinimalSoftwareWindow>, width: u32, height: u32) -> Vec<Rgb8Pixel> {
+        window.set_size(PhysicalSize::new(width, height));
+        let mut buffer = vec![Rgb8Pixel::new(0, 0, 0); (width * height) as usize];
+        window.draw_if_needed(|renderer| {
+            renderer.render(&mut buffer, width as usize);
+        });
+        buffer
+    }
+
+    /// Counts pixels within `(x0..x1, y0..y1)` whose color differs from
+    /// `background` by more than `threshold` per channel -- a cheap proxy
+    /// for "something was actually drawn here" (text glyphs, in practice)
+    /// without needing to read individual character shapes.
+    fn count_non_background_pixels(
+        buffer: &[Rgb8Pixel],
+        width: u32,
+        (x0, y0, x1, y1): (u32, u32, u32, u32),
+        background: (u8, u8, u8),
+        threshold: i32,
+    ) -> usize {
+        let differs = |a: u8, b: u8| (a as i32 - b as i32).abs() > threshold;
+        (y0..y1)
+            .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let p = buffer[(y * width + x) as usize];
+                differs(p.r, background.0) || differs(p.g, background.1) || differs(p.b, background.2)
+            })
+            .count()
+    }
+
+    /// Regression test for a bug where the output panel's `TextEdit` had
+    /// `horizontal-stretch`/`vertical-stretch` set (which only has an
+    /// effect inside an actual `Layout`) but was placed directly inside a
+    /// plain `Rectangle`, so it silently rendered at ~0 size -- `run-log`
+    /// was populated correctly the whole time (verified separately by
+    /// `integration_tests`), but nothing was ever visible on screen. Reading
+    /// properties back doesn't catch this class of bug; only checking
+    /// actual rendered pixels does.
+    #[test]
+    fn recipe_output_is_visibly_rendered_not_just_populated() {
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+        slint::platform::set_platform(Box::new(TestPlatform(window.clone()))).ok();
+
+        let dir = std::env::temp_dir().join(format!("justgui-render-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("justfile"), "build:\n    echo hello world from build\n").unwrap();
+        let dir = dir.to_string_lossy().into_owned();
+
+        let ui = AppWindow::new().expect("failed to create Slint window");
+        let state = Rc::new(RefCell::new(AppState {
+            dir: dir.clone(),
+            model: JustModel::default(),
+            param_values: Vec::new(),
+            run_proc: Process::new(),
+            run_log: String::new(),
+            running_recipe: String::new(),
+            edit_dirty: false,
+            edit_status: String::new(),
+            theme: ThemeConfig::default(),
+            editing_theme: false,
+            layout: layout::LayoutConfig::default(),
+        }));
+        ui.set_directory(dir.clone().into());
+        reload(&ui, &state);
+        {
+            let ui_handle = ui.as_weak();
+            let state = state.clone();
+            ui.on_run_recipe(move |idx| {
+                if let Some(ui) = ui_handle.upgrade() {
+                    run_recipe(&ui, &state, idx as usize);
+                }
+            });
+        }
+
+        let idx = state.borrow().model.recipes.iter().position(|r| r.name == "build").unwrap();
+        ui.invoke_run_recipe(idx as i32);
+        for _ in 0..30 {
+            poll_log(&ui, &state);
+            if ui.get_run_log().contains("hello world from build") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(ui.get_run_log().contains("hello world from build"), "run_log never populated");
+
+        let (width, height) = (1000, 700);
+        let buffer = render(&window, width, height);
+
+        // The output panel occupies roughly the bottom third of the default
+        // 1000x700 window; sample a region comfortably inside it (below the
+        // "Output" header row, above the stdin input row) against the
+        // default `panel-background` (#2a2a2a). If the layout changes
+        // meaningfully these coordinates may need adjusting.
+        let non_background = count_non_background_pixels(
+            &buffer,
+            width,
+            (20, 440, 980, 620),
+            (0x2a, 0x2a, 0x2a),
+            24,
+        );
+        assert!(
+            non_background > 200,
+            "expected visible text glyphs in the output panel, found {non_background} differing pixels"
+        );
+
+        let _ = std::fs::remove_dir_all(&state.borrow().dir);
+    }
+}
+
 fn main() {
     let ui = AppWindow::new().expect("failed to create Slint window");
 

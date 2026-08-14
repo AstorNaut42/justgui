@@ -2,6 +2,7 @@
 // Reads a justfile via `just --dump --dump-format json`, renders one
 // button per recipe (with input fields for its parameters), streams the
 // recipe's output live, and offers a plain-text editor for the justfile.
+mod envfile;
 mod just_client;
 mod layout;
 mod process;
@@ -55,6 +56,7 @@ struct AppState {
     layout: layout::LayoutConfig,
     last_linted_buffer: String, // edit-buffer text the linter last checked
     edit_lint_error: String,
+    env_file: envfile::EnvFile, // Settings popup, backed by the project's .env
 }
 
 fn apply_theme(ui: &AppWindow, cfg: &ThemeConfig) {
@@ -213,6 +215,25 @@ fn sync_ui(ui: &AppWindow, st: &AppState) {
     )));
 
     sync_theme_ui(ui, &st.theme);
+    sync_settings_ui(ui, st);
+}
+
+/// A `.env` value is shown as a toggle if it's exactly (case-insensitively)
+/// "true"/"false", and as a plain text field otherwise -- covers strings and
+/// numbers alike without guessing at numeric ranges/precision we can't know.
+fn setting_data(key: &str, value: &str) -> SettingData {
+    let is_bool = value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false");
+    SettingData {
+        key: key.into(),
+        value: value.into(),
+        is_bool,
+        bool_value: is_bool && value.eq_ignore_ascii_case("true"),
+    }
+}
+
+fn sync_settings_ui(ui: &AppWindow, st: &AppState) {
+    let settings: Vec<SettingData> = st.env_file.vars().map(|(k, v)| setting_data(k, v)).collect();
+    ui.set_settings(ModelRc::new(VecModel::from(settings)));
 }
 
 /// Updates `model` in place to match `desired`, using targeted
@@ -338,6 +359,7 @@ fn reload(ui: &AppWindow, state: &Rc<RefCell<AppState>>) {
     layout::sync_entries(layout, &model.recipes);
     let _ = layout::save(&st.dir, &st.layout);
     st.editing_theme = false;
+    st.env_file = envfile::EnvFile::load(&st.dir);
 
     st.param_values = st
         .model
@@ -577,6 +599,38 @@ fn clear_log(ui: &AppWindow, state: &Rc<RefCell<AppState>>) {
     ui.set_run_log("".into());
 }
 
+fn set_setting_value(ui: &AppWindow, state: &Rc<RefCell<AppState>>, key: &str, value: &str) {
+    let mut st = state.borrow_mut();
+    st.env_file.set(key, value);
+    let _ = st.env_file.save(&st.dir);
+    sync_settings_ui(ui, &st);
+}
+
+/// Adds a new blank (empty-string, so it starts out as a text field) `.env`
+/// entry. A no-op for an empty or already-existing key -- silently, since
+/// this is driven by a plain text field next to an "Add" button rather than
+/// a form with its own validation/error display.
+fn add_setting(ui: &AppWindow, state: &Rc<RefCell<AppState>>, key: &str) {
+    let key = key.trim();
+    if key.is_empty() {
+        return;
+    }
+    let mut st = state.borrow_mut();
+    if st.env_file.vars().any(|(k, _)| k == key) {
+        return;
+    }
+    st.env_file.set(key, "");
+    let _ = st.env_file.save(&st.dir);
+    sync_settings_ui(ui, &st);
+}
+
+fn remove_setting(ui: &AppWindow, state: &Rc<RefCell<AppState>>, key: &str) {
+    let mut st = state.borrow_mut();
+    st.env_file.remove(key);
+    let _ = st.env_file.save(&st.dir);
+    sync_settings_ui(ui, &st);
+}
+
 fn save_layout(ui: &AppWindow, state: &Rc<RefCell<AppState>>) {
     let st = state.borrow();
     let _ = layout::save(&st.dir, &st.layout);
@@ -782,6 +836,7 @@ mod integration_tests {
             layout: layout::LayoutConfig::default(),
             last_linted_buffer: String::new(),
             edit_lint_error: String::new(),
+            env_file: envfile::EnvFile::default(),
         }));
         bind_models(&ui, &state.borrow());
 
@@ -872,6 +927,7 @@ mod integration_tests {
             layout: layout::LayoutConfig::default(),
             last_linted_buffer: String::new(),
             edit_lint_error: String::new(),
+            env_file: envfile::EnvFile::default(),
         }));
         bind_models(&ui, &state.borrow());
         ui.set_directory(dir.clone().into());
@@ -947,6 +1003,110 @@ mod integration_tests {
         // not hang or panic.
         ui.invoke_close_session(stay_up_id);
         assert_eq!(state.borrow().sessions.len(), 0);
+
+        let _ = std::fs::remove_dir_all(&state.borrow().dir);
+    }
+
+    /// End-to-end check of the Settings popup's `.env` round trip, through
+    /// the same callback pipeline a real click would use: load picks up an
+    /// existing `.env`, editing/toggling/adding/removing all persist to
+    /// disk and update `ui.get_settings()` in step.
+    #[test]
+    fn settings_popup_edits_round_trip_through_env_file() {
+        test_support::setup();
+        let dir = std::env::temp_dir().join(format!("justgui-settings-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("justfile"), "build:\n    echo hi\n").unwrap();
+        std::fs::write(dir.join(".env"), "FOO=bar\nDEBUG=true\n").unwrap();
+        let dir = dir.to_string_lossy().into_owned();
+
+        let ui = AppWindow::new().expect("failed to create Slint window");
+        let state = Rc::new(RefCell::new(AppState {
+            dir: dir.clone(),
+            model: JustModel::default(),
+            param_values: Vec::new(),
+            sessions: Vec::new(),
+            next_session_id: 0,
+            active_session: -1,
+            sessions_model: Rc::new(VecModel::default()),
+            recipes_model: Rc::new(VecModel::default()),
+            param_recipes_model: Rc::new(VecModel::default()),
+            edit_dirty: false,
+            edit_status: String::new(),
+            theme: ThemeConfig::default(),
+            editing_theme: false,
+            layout: layout::LayoutConfig::default(),
+            last_linted_buffer: String::new(),
+            edit_lint_error: String::new(),
+            env_file: envfile::EnvFile::default(),
+        }));
+        bind_models(&ui, &state.borrow());
+        ui.set_directory(dir.clone().into());
+        reload(&ui, &state);
+        {
+            let ui_handle = ui.as_weak();
+            let state = state.clone();
+            ui.on_setting_value_edited(move |key, value| {
+                if let Some(ui) = ui_handle.upgrade() {
+                    set_setting_value(&ui, &state, key.as_str(), value.as_str());
+                }
+            });
+        }
+        {
+            let ui_handle = ui.as_weak();
+            let state = state.clone();
+            ui.on_setting_bool_toggled(move |key, value| {
+                if let Some(ui) = ui_handle.upgrade() {
+                    set_setting_value(&ui, &state, key.as_str(), if value { "true" } else { "false" });
+                }
+            });
+        }
+        {
+            let ui_handle = ui.as_weak();
+            let state = state.clone();
+            ui.on_add_setting(move |key| {
+                if let Some(ui) = ui_handle.upgrade() {
+                    add_setting(&ui, &state, key.as_str());
+                }
+            });
+        }
+        {
+            let ui_handle = ui.as_weak();
+            let state = state.clone();
+            ui.on_remove_setting(move |key| {
+                if let Some(ui) = ui_handle.upgrade() {
+                    remove_setting(&ui, &state, key.as_str());
+                }
+            });
+        }
+
+        // Loaded correctly, with the right widget kind inferred per value.
+        let settings = ui.get_settings();
+        let foo = settings.iter().find(|s| s.key == "FOO").expect("FOO should be loaded");
+        assert!(!foo.is_bool);
+        assert_eq!(foo.value, "bar");
+        let debug = settings.iter().find(|s| s.key == "DEBUG").expect("DEBUG should be loaded");
+        assert!(debug.is_bool);
+        assert!(debug.bool_value);
+
+        // Toggling a bool persists to disk and updates the model.
+        ui.invoke_setting_bool_toggled("DEBUG".into(), false);
+        assert!(!ui.get_settings().iter().find(|s| s.key == "DEBUG").unwrap().bool_value);
+        assert_eq!(envfile::EnvFile::load(&dir).vars().find(|(k, _)| *k == "DEBUG").unwrap().1, "false");
+
+        // Editing a text value persists too.
+        ui.invoke_setting_value_edited("FOO".into(), "baz".into());
+        assert_eq!(ui.get_settings().iter().find(|s| s.key == "FOO").unwrap().value, "baz");
+        assert_eq!(envfile::EnvFile::load(&dir).vars().find(|(k, _)| *k == "FOO").unwrap().1, "baz");
+
+        // Adding a new key shows up as a (non-bool) setting.
+        ui.invoke_add_setting("NEW_KEY".into());
+        assert!(ui.get_settings().iter().any(|s| s.key == "NEW_KEY"));
+
+        // Removing drops it from both the model and disk.
+        ui.invoke_remove_setting("FOO".into());
+        assert!(!ui.get_settings().iter().any(|s| s.key == "FOO"));
+        assert!(!envfile::EnvFile::load(&dir).vars().any(|(k, _)| k == "FOO"));
 
         let _ = std::fs::remove_dir_all(&state.borrow().dir);
     }
@@ -1027,6 +1187,7 @@ mod render_tests {
             layout: layout::LayoutConfig::default(),
             last_linted_buffer: String::new(),
             edit_lint_error: String::new(),
+            env_file: envfile::EnvFile::default(),
         }));
         bind_models(&ui, &state.borrow());
         ui.set_directory(dir.clone().into());
@@ -1115,6 +1276,7 @@ mod render_tests {
             layout: layout::LayoutConfig::default(),
             last_linted_buffer: String::new(),
             edit_lint_error: String::new(),
+            env_file: envfile::EnvFile::default(),
         }));
         bind_models(&ui, &state.borrow());
         ui.set_directory(dir.clone().into());
@@ -1207,6 +1369,7 @@ fn main() {
         layout: layout::LayoutConfig::default(),
         last_linted_buffer: String::new(),
         edit_lint_error: String::new(),
+        env_file: envfile::EnvFile::default(),
     }));
     bind_models(&ui, &state.borrow());
 
@@ -1386,6 +1549,46 @@ fn main() {
         ui.on_save_theme(move || {
             if let Some(ui) = ui_handle.upgrade() {
                 save_theme(&ui, &state);
+            }
+        });
+    }
+
+    {
+        let ui_handle = ui.as_weak();
+        let state = state.clone();
+        ui.on_setting_value_edited(move |key, value| {
+            if let Some(ui) = ui_handle.upgrade() {
+                set_setting_value(&ui, &state, key.as_str(), value.as_str());
+            }
+        });
+    }
+
+    {
+        let ui_handle = ui.as_weak();
+        let state = state.clone();
+        ui.on_setting_bool_toggled(move |key, value| {
+            if let Some(ui) = ui_handle.upgrade() {
+                set_setting_value(&ui, &state, key.as_str(), if value { "true" } else { "false" });
+            }
+        });
+    }
+
+    {
+        let ui_handle = ui.as_weak();
+        let state = state.clone();
+        ui.on_add_setting(move |key| {
+            if let Some(ui) = ui_handle.upgrade() {
+                add_setting(&ui, &state, key.as_str());
+            }
+        });
+    }
+
+    {
+        let ui_handle = ui.as_weak();
+        let state = state.clone();
+        ui.on_remove_setting(move |key| {
+            if let Some(ui) = ui_handle.upgrade() {
+                remove_setting(&ui, &state, key.as_str());
             }
         });
     }

@@ -43,6 +43,13 @@ export struct RunSession {
     needs-input: bool,
 }
 
+export struct SettingData {
+    key: string,
+    value: string, // canonical string form, always kept in sync even for bools
+    is-bool: bool,
+    bool-value: bool, // meaningful only when is-bool
+}
+
 export component AppWindow inherits Window {
     title: "justgui";
     preferred-width: 1000px;
@@ -84,6 +91,8 @@ export component AppWindow inherits Window {
     in property <bool> theme-dark-mode;
     in property <[RunSession]> sessions;
     in property <int> active-session: -1;
+    in property <[SettingData]> settings;
+    in-out property <string> new-setting-key;
 
     // Which recipe (by recipe-index) is currently "picked up" to be moved;
     // -1 means nothing is picked up. Purely local UI state, not persisted --
@@ -108,6 +117,10 @@ export component AppWindow inherits Window {
     callback select-session(int);
     callback close-session(int);
     callback edit-externally();
+    callback setting-value-edited(string, string);
+    callback setting-bool-toggled(string, bool);
+    callback add-setting(string);
+    callback remove-setting(string);
 
     VerticalLayout {
         padding: 8px;
@@ -133,6 +146,80 @@ export component AppWindow inherits Window {
                 horizontal-stretch: 1;
             }
             Button { text: "Theme"; clicked => { theme-popup.show(); } }
+            Button { text: "⚙ Settings"; clicked => { settings-popup.show(); } }
+        }
+
+        settings-popup := PopupWindow {
+            x: 0px;
+            y: dir-row.height + toolbar-row.height + 12px;
+            width: 340px;
+            height: 360px;
+            close-policy: PopupClosePolicy.close-on-click-outside;
+            Rectangle {
+                width: 100%;
+                height: 100%;
+                background: Theme.panel-background;
+                border-radius: Theme.corner-radius;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                VerticalLayout {
+                    padding: 10px;
+                    spacing: 6px;
+
+                    Text { text: "Settings (.env)"; font-weight: 700; color: Theme.accent; }
+                    Text {
+                        text: "Values here are written to .env next to the justfile. Recipes only see them if the justfile has `set dotenv-load := true`.";
+                        color: Theme.muted-text;
+                        wrap: word-wrap;
+                        font-size: 11px;
+                    }
+
+                    Rectangle { height: 1px; background: Theme.border; }
+
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 4px;
+                            for setting[_] in root.settings : HorizontalLayout {
+                                spacing: 6px;
+                                Text { text: setting.key; vertical-alignment: center; min-width: 100px; }
+                                if setting.is-bool : Switch {
+                                    horizontal-stretch: 1;
+                                    checked: setting.bool-value;
+                                    toggled => { root.setting-bool-toggled(setting.key, self.checked); }
+                                }
+                                if !setting.is-bool : LineEdit {
+                                    text: setting.value;
+                                    horizontal-stretch: 1;
+                                    edited(t) => { root.setting-value-edited(setting.key, t); }
+                                }
+                                TouchArea {
+                                    width: 16px;
+                                    clicked => { root.remove-setting(setting.key); }
+                                    Text { text: "×"; color: Theme.text; }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle { height: 1px; background: Theme.border; }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        LineEdit {
+                            text <=> root.new-setting-key;
+                            placeholder-text: "NEW_KEY";
+                            horizontal-stretch: 1;
+                            accepted(t) => { root.add-setting(t); root.new-setting-key = ""; }
+                        }
+                        Button {
+                            text: "Add";
+                            clicked => { root.add-setting(root.new-setting-key); root.new-setting-key = ""; }
+                        }
+                    }
+                }
+            }
         }
 
         theme-popup := PopupWindow {

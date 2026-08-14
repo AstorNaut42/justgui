@@ -99,8 +99,9 @@ That's it — a window opens with:
 - **Edit justfile tab**: the raw justfile as text — see
   [Editing the justfile](#editing-the-justfile).
 
-A "Transparency" slider and a "Theme" button sit above the tabs — see
-[Transparency and the theme editor](#transparency-and-the-theme-editor).
+A "Transparency" slider, a "Theme" button, and a "⚙ Settings" button sit
+above the tabs — see [Transparency and the theme editor](#transparency-and-the-theme-editor)
+and [Settings (.env)](#settings-env).
 
 Every recipe you run gets its own session, so several can run at once —
 see [Live output and input](#live-output-and-input). Output from whichever
@@ -161,6 +162,33 @@ inside that panel, which overwrites `justgui.toml` (same tradeoff as the
 added to `justgui.toml` by hand won't survive a Save here). Until you Save
 or hit the top-level "Reload" button, live edits aren't clobbered by the
 usual once-a-second config file watch (see [Styling](#styling)).
+
+## Settings (.env)
+
+The "⚙ Settings" button opens a panel over the project's `.env` file (next
+to the justfile) — a place for the kind of project-level toggles/values a
+recipe reads (a feature flag, a target host, a port), edited from the GUI
+instead of by hand. justgui doesn't invent its own config format for this:
+`.env` is what most projects already use for exactly this, and `just` has
+native support for loading it (`set dotenv-load := true` in the justfile) —
+so justgui only has to read and write the file, and `just` does the actual
+work of getting those values into a recipe's environment.
+
+Each line becomes a row: a value that's exactly `true` or `false` (any
+case) shows as a toggle, anything else — text or a number — shows as a
+plain text field. Edits save to `.env` immediately, no separate "Save"
+button. Type a new key into the bottom field and click "Add" for a new
+entry (starts out as an empty text field — type `true`/`false` into it and
+it becomes a toggle the next time the panel refreshes); click a row's × to
+remove it. Comments and blank lines already in a hand-edited `.env` survive
+being edited through the panel — only the specific `KEY=VALUE` lines you
+touch change.
+
+Recipes only actually see these values if the justfile opts in with `set
+dotenv-load := true` (or `set dotenv-required := true`) — that's `just`'s
+own setting, not something justgui adds for you, so add it yourself if you
+want recipes reading `.env` values via `{{env_var('KEY')}}` or as inherited
+environment variables.
 
 ## Live output and input
 

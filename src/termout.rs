@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn recognizes_common_prompt_shapes() {
-        assert!(looks_like_prompt("[sudo] password for dan: "));
+        assert!(looks_like_prompt("[sudo] password for user: "));
         assert!(looks_like_prompt("Continue? [y/N] "));
         assert!(looks_like_prompt("profile> "));
         assert!(looks_like_prompt("some prior line\nEnter passphrase:"));

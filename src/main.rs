@@ -807,7 +807,7 @@ mod integration_tests {
     if [ -z "$profile" ]; then
         echo "Select a network emulation profile:"
         PS3="profile> "
-        select choice in none fiber_backhaul maritime_4g_good maritime_4g_degraded satellite_geo; do
+        select choice in none fast slow flaky offline; do
             if [ -n "$choice" ]; then profile="$choice"; break; fi
             echo "Invalid selection."
         done
@@ -889,7 +889,7 @@ mod integration_tests {
 
         let final_log = ui.get_run_log().to_string();
         assert!(saw_prompt, "never saw the select prompt in run_log: {final_log:?}");
-        assert!(final_log.contains("chosen profile: fiber_backhaul"), "final log: {final_log:?}");
+        assert!(final_log.contains("chosen profile: fast"), "final log: {final_log:?}");
 
         let _ = std::fs::remove_dir_all(&state.borrow().dir);
     }

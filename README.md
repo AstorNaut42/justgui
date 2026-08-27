@@ -10,8 +10,9 @@ json`), so justgui never parses justfile syntax and stays correct as `just`
 evolves.
 
 This is a Rust + [Slint](https://slint.dev) rewrite of an earlier C++/Dear
-ImGui prototype (kept in [`../src`](../src) for reference). Colors, fonts and
-corner radius are all driven by a small `justgui.toml` config file, and are
+ImGui prototype (kept on the `justgui-cpp` branch for reference). Colors,
+fonts and corner radius are all driven by a small `justgui.toml` config
+file, and are
 re-applied live while the app is running — edit the file, save, and the
 window restyles itself with no restart.
 
@@ -42,7 +43,7 @@ reads whatever justfile is in the current directory.
 
 ## Setup: build and install
 
-From this directory (`justgui-rs/`):
+From this directory:
 
 ```sh
 just install
@@ -175,14 +176,16 @@ so justgui only has to read and write the file, and `just` does the actual
 work of getting those values into a recipe's environment.
 
 Each line becomes a row: a value that's exactly `true` or `false` (any
-case) shows as a toggle, anything else — text or a number — shows as a
-plain text field. Edits save to `.env` immediately, no separate "Save"
-button. Type a new key into the bottom field and click "Add" for a new
-entry (starts out as an empty text field — type `true`/`false` into it and
-it becomes a toggle the next time the panel refreshes); click a row's × to
-remove it. Comments and blank lines already in a hand-edited `.env` survive
-being edited through the panel — only the specific `KEY=VALUE` lines you
-touch change.
+case) shows as a toggle — flip it and it saves immediately. Anything else —
+text or a number — shows as a plain text field: type your change, then
+either press Enter or click its ✓ to save, or press Esc to discard it and
+revert to the saved value (a text field doesn't save on every keystroke,
+so it doesn't fight you for focus while you're mid-edit). Type a new key
+into the bottom field and click "Add" for a new entry (starts out as an
+empty text field — type `true`/`false` into it and it becomes a toggle the
+next time the panel refreshes); click a row's × to remove it. Comments and
+blank lines already in a hand-edited `.env` survive being edited through
+the panel — only the specific `KEY=VALUE` lines you touch change.
 
 Recipes only actually see these values if the justfile opts in with `set
 dotenv-load := true` (or `set dotenv-required := true`) — that's `just`'s

@@ -189,10 +189,26 @@ export component AppWindow inherits Window {
                                     checked: setting.bool-value;
                                     toggled => { root.setting-bool-toggled(setting.key, self.checked); }
                                 }
-                                if !setting.is-bool : LineEdit {
-                                    text: setting.value;
+                                if !setting.is-bool : HorizontalLayout {
                                     horizontal-stretch: 1;
-                                    edited(t) => { root.setting-value-edited(setting.key, t); }
+                                    spacing: 4px;
+                                    value-field := LineEdit {
+                                        text: setting.value;
+                                        horizontal-stretch: 1;
+                                        accepted(t) => { root.setting-value-edited(setting.key, t); }
+                                        key-pressed(event) => {
+                                            if (event.text == Key.Escape) {
+                                                self.text = setting.value;
+                                                return accept;
+                                            }
+                                            return reject;
+                                        }
+                                    }
+                                    TouchArea {
+                                        width: 20px;
+                                        clicked => { root.setting-value-edited(setting.key, value-field.text); }
+                                        Text { text: "✓"; color: Theme.accent; vertical-alignment: center; }
+                                    }
                                 }
                                 TouchArea {
                                     width: 16px;
